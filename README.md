@@ -150,8 +150,8 @@ helper 只认环境变量 `SNAPWHEEL_OCR_DIR`，由 `ocr.py` 透传。两个目�
 JSON 里多打 `iw/ih/pw/ph` 告诉你补边前后的尺寸。这也是为什么**别把 helper 换回旧版**。
 实测记录见 `docs\OCR-NOTES.md` 第 7 节。
 
-`helper\build-ocr.ps1` 直接编译 `C:\Users\Maverick\SnapWheel\src\56-Ocr.cs`
-等文件，不复制源码 —— SnapWheel 那边改了，重跑一次脚本就同步。
+`helper\build-ocr.ps1` 直接编译 `helper\src\` 下那三个 C# 文件（从 SnapWheel 仓库 vendored 过来的），
+不用装 Visual Studio —— 用系统自带的 csc.exe。想编别的副本就 `-SrcDir <路径>`。
 
 ## 自检（改完代码跑这几条）
 

@@ -14,6 +14,9 @@ data/tmp/
 data/ocr-bench/history.jsonl
 data/ocr-bench/REPORT.md
 
+# 从真实屏幕框选出来的语料含私人内容（聊天记录、路径），只留在本机
+data/ocr-bench/cases/dsh-*/
+
 # 词库和模型太大（词库 182MB、模型 165MB），用脚本下：
 #   python tools\fetch_dict.py        离线词典
 #   python tools\fetch_ocr_model.py   OCR 模型

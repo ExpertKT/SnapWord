@@ -59,7 +59,7 @@ native 的残缺结果**是非空的**，所以 system 永远没机会上场。�
 | 长度 | `min(len, 120) * 0.05`（只做同分时的取舍） |
 
 `-1000` 是**故意的**：只要有一段认糊了，分数就该掉到 `OCR_STRONG = 10` 以下，
-逼 `auto` 去问第二个引擎。代价是专有名词（`SnapWord`、`Maverick`）也被当成"不认识"，
+逼 `auto` 去问第二个引擎。代价是专有名词（`SnapWord`、`Chromium`）也被当成"不认识"，
 不过那只是白跑一趟第二个引擎，**结果不会更差**。
 
 `oc.recognize_file(engine="auto")` 的规则：native 先跑 → 分数 ≥ `OCR_STRONG` 就收工
@@ -142,7 +142,7 @@ JSON 多打 `iw/ih/pw/ph` 四个字段（补边前后尺寸，方便诊断）。
 
 | 用例（真屏幕像素） | 补边前 | 补边后 |
 |---|---|---|
-| `dsh-line1-宽留白` 1690x46 | native `保` | native `它想调的那条路，在你的仓库里不存在。我在C:\Users\Maverick\SnapWheel\src\里 qrep 了--capture 和CaptureMode——0处。那个入口`（只错 `grep→qrep`） |
+| `dsh-line1-宽留白` 1690x46 | native `保` | native `它想调的那条路，在你的仓库里不存在。我在C:\…\SnapWheel\src\里 qrep 了--capture 和CaptureMode——0处。那个入口`（只错 `grep→qrep`） |
 | `dsh-line4-宽留白` 1690x46 | native `保` | native 整句**全对** |
 
 `prep_probe.py` 的逐变体对照（真裁图，只变预处理）：**上下补边**是最有效的一格

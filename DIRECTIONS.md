@@ -123,14 +123,13 @@
 
 ## OCR 这条线
 
-`helper\ocr-helper.exe` 是 **SnapWheel 的 C# 源码编出来的**，不是复制的源码：
+`helper\ocr-helper.exe` 是 **SnapWheel 的 C# 源码编出来的**（源码已 vendored 到 `helper\src\`）：
 
-- `helper\build-ocr.ps1` 直接编译
-  `C:\Users\Maverick\SnapWheel\src\56-Ocr.cs` + `57-OcrNative.cs` + `92-OcrTall.cs`
+- `helper\build-ocr.ps1` 直接编译 `helper\src\` 里的 `56-Ocr.cs` + `57-OcrNative.cs` + `92-OcrTall.cs`
   \+ 本目录的 `Stubs.cs`（补 `Err.Log/Note/Notify`、`Lang.T`）+ `Program.cs`。
-- 用的编译器是 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`（框架自带）。
-- **SnapWheel 那边改了 OCR 源码**，重跑一次 `build-ocr.ps1` 就同步；不用改 Python。
-- 实测 OCR 一张 900x240 的图约 100 ms，输出 `{"ok":...,"ms":...,"text":...}`。
+  `-SrcDir <路径>` 可以改去编别处的副本。
+- 用的编译器是 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`（框架自带，不用装 VS）。
+- **SnapWheel 那边改了 OCR 源码**，把文件再拷一遍进 `helper\src\` 重跑一次 `build-ocr.ps1` 就同步。
 
 ### 两个引擎（互补，`auto` 的"谁来挑"是 Python 写的）
 - `native` = 本地 PP-OCRv6，在 **`F:\ppocr\x64\lw.OpenCVDNN.PPOCR-v1.2.1.0-win7-x64`**
