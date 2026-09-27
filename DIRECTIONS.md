@@ -304,15 +304,41 @@ F:\SnapWord\.venv\Scripts\python.exe -X utf8 F:\SnapWord\tmp\hotkey_test.py
 （QThread 里的异常走后者，不走前者）。**`traceback.print_exc()` 往 `None` 上 write 会当场
 AttributeError**，所以这个钩子不只是好看，是防止后台任务把进程搞崩还什么都没留下。
 
+## 发布到 GitHub
+
+仓库已经 `git init` 并提交了第一个 commit（分支 `main`，70 个文件，`.git` 约 5.6 MB ——
+`helper\lw.OpenCVDNN.PPOCR.dll` 那 14 MB 压得很好）。**没有推**，因为远端要用户自己建。
+用户拿到仓库地址后：
+
+```bat
+cd F:\SnapWord
+git remote add origin https://github.com/ExpertKT/SnapWord.git
+git push -u origin main
+```
+
+仓库身份先在本地配了 `user.name=ExpertKT` / `user.email=ExpertKT@users.noreply.github.com`
+（`.git/config`，随仓库走；要改名改邮箱用 `git config user.email ...`，别用全局的）。
+
+**提交进仓库的东西**：源码、`helper\`（含 DLL 和它的 LICENSE/THIRD_PARTY_NOTICES）、
+`helper\src\`（vendored 的 SnapWheel OCR 源码）、`docs\`（截图 + UI-STYLE + OCR-NOTES）、
+`data\ocr-bench\cases\`（OCR 回归语料，几百 KB）、`tools\`、`tests\`、README/DIRECTIONS/LICENSE/.gitignore。
+
+**故意不提交**：`.venv/`、`models/`（165 MB，用 `tools\fetch_ocr_model.py` 下）、
+`data\ecdict.db`（182 MB，用 `tools\fetch_dict.py` 下）、`config.json`（每台机器不一样）、
+`data\cache.db`、`data\snapword.log`、`tmp/`、`data\ocr-bench\{history.jsonl,REPORT.md}`（跑出来的）。
+
+发布前要确认的三条：① `git status` 干净；② `config.json` 没被跟踪（里面有用户自己的 key）；
+③ README 里那五步在一台干净机器上真的能跑（只有 `python -m venv` + pip 是外部依赖）。
+
 ## 还没做的（按用户优先级排）
 
+- **OCR 语料现在 16 条**（14 合成 + 2 张真实屏幕裁图），真框选的还很不够，得用户用
+  `ocr_bench.py collect` 攒；深底浅字小字号中文两种抓法都读不全（见 `docs\OCR-NOTES.md` 7.7）。
 - 鼠标停词（悬停 0.5 s 自动取词）—— 简报第 4 节提过，用户没强求。
 - 多显示器：`App.start_pick` 只抓鼠标所在那一块屏；dock 现在**默认主屏**、可在设置/托盘里换屏，
   但拖 rail 只能上下挪，没法拖着跨屏。副屏上没实测过（副屏 `QRect(2560,0,1707,1067)`，
   缩放率和主屏不一样，DPR 换算会得到 293x300 这种数 —— 那是 Qt 的缩放，不是布局 bug）。
 - 百度翻译的 appid/密钥要用户自己去 fanyi-api.baidu.com 领（代码和设置项都好了，key 还没填）。
-- **OCR 语料还只有 14 条合成用例**，真框选的得用户用 `ocr_bench.py collect` 攒；两个引擎同时
-  认糊的场景没救（见 `docs\OCR-NOTES.md` 第 7 节的下一步）。
 - 词形还原是后缀规则拼的，不是 ECDICT 的 lemma 反查。
 - 面板展开/收起、卡片进出场、卡片长高都做了动画（见 `docs\UI-STYLE.md`）；还剩
   托盘菜单和设置对话框的进出场没做（那俩是系统 QMenu / QDialog，动画收益小、风险大）。

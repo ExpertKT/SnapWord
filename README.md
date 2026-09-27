@@ -110,9 +110,10 @@ src\snapword\
   cache.py      按词缓存（SQLite）
   winput.py     全局热键、SendInput 发 Ctrl+C、前台窗口类名（纯 ctypes）
   config.py     config.json 的默认值与读写
-helper\         OCR helper（C# 编译的单文件 exe）+ 构建脚本
+helper\         OCR helper（C# 编译的单文件 exe）+ 构建脚本 + helper\src\（vendored 的 C# 源码）
+models\         OCR 模型（不提交，用下面那个脚本下）
 tools\fetch_dict.py   下 182 MB 的离线词库（走 npm 镜像，1.5 秒）
-tools\fetch_ocr_model.py  下 PP-OCRv5 server 大模型（走 ModelScope，~5 MB/s）
+tools\fetch_ocr_model.py  下 OCR 模型（快模型 5MB 秒下；--model ppocrv5-server 是那 165MB 的准模型）
 tools\ocr_bench.py    OCR 识别能力的自迭代测试台（判定 + 归因 + 报告）
 tests\test_core.py    裸断言，无框架：python tests\test_core.py
 docs\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
@@ -128,7 +129,7 @@ OCR 是**复用 SnapWheel 的 C# 源码**编出来的 `helper\ocr-helper.exe`，
     （`serendipity` → `sereridipity`、`idipity⏎C`）→ 语料通过 10/16。
   - **PP-OCRv5 server（165MB）**：准得多，上面那些全部读对 → 通过 **15/16**，
     但一次调用 **1.2s**（helper 一个进程一次调用，每次都要重新加载 165MB 模型）。
-    下它：`python tools\fetch_ocr_model.py`（走 ModelScope，~5 MB/s）。
+    下它：`python tools\fetch_ocr_model.py --model ppocrv5-server`（走 ModelScope，~5 MB/s，半分钟）
 
 **`auto`（默认）走"便宜在前"的阶梯**：`native+tiny` → 分数不够 → `native+v5server` →
 `system`，谁分高用谁（分数由离线词典算，见下）。所以**普通词 ~60-90ms 出结果，
