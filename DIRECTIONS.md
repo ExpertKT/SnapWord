@@ -329,6 +329,23 @@ git push -u origin main
 发布前要确认的三条：① `git status` 干净；② `config.json` 没被跟踪（里面有用户自己的 key）；
 ③ README 里那五步在一台干净机器上真的能跑（只有 `python -m venv` + pip 是外部依赖）。
 
+### 发一个版本（release）
+
+```bat
+python tools\make_release.py                                :: 打 zip 到桌面（只装 git 跟踪的文件）
+git tag -a v0.1.0beta -m "SnapWord v0.1.0beta：屏幕查词"
+git push origin v0.1.0beta
+gh release create v0.1.0beta "C:\Users\<你>\Desktop\SnapWord-v0.1.0beta.zip" ^
+   --title "SnapWord v0.1.0beta · 屏幕查词" --notes-file tmp\release-notes.md
+```
+
+- zip 里的 `setup.cmd` / `SnapWord.cmd` 是 `tools\make_release.py` **当场生成的**（不放进仓库，
+  免得仓库根目录出现两份启动器）。两个脚本必须纯 ASCII —— cmd.exe 按 OEM 代码页读。
+- `gh release create` 不加 `--prerelease` 就是 Latest；想标成预发布加这个参数。
+- 打完 tag 之后再改 README 不影响已发布的 zip（zip 是构建出来的，不是 git 导出）——
+  所以**先改文档、再打包、最后打 tag** 才是干净的顺序。
+- 发布后检查：`gh release view v0.1.0beta --json assets` 里资产在，下载链接点得开。
+
 ## 还没做的（按用户优先级排）
 
 - **OCR 语料现在 16 条**（14 合成 + 2 张真实屏幕裁图），真框选的还很不够，得用户用

@@ -4,6 +4,9 @@
 
 屏幕上看到不认识的词 → 框一下 → 卡片就出来。挂着常驻、不抢焦点。
 
+**[⬇ 下载 v0.1.0beta](https://github.com/ExpertKT/SnapWord/releases/latest)**（5 MB 自举包：解压 → `setup.cmd` → `SnapWord.cmd`）；
+下面的「跑起来」是同一件事的手动版。
+
 ![卡片](docs/card-word.png)
 
 ## 跑起来
