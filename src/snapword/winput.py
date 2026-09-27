@@ -211,3 +211,66 @@ class HotkeyThread(threading.Thread):
 
     def stop(self):
         self._stop.set()
+
+
+# --------------------------------------------------------------------------
+# 开机启动：写 HKCU 的 Run 键。不用计划任务、不用 StartUp 文件夹快捷方式 ——
+# 注册表最省事（不需要管理员，开关就是写/删一个值），卸载也干净。
+# --------------------------------------------------------------------------
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME = "SnapWord"
+
+
+def autostart_command():
+    """开机要执行的命令行。用 pythonw.exe，不然登录时会先闪一个黑框。"""
+    import sys
+    from pathlib import Path
+    exe = Path(sys.executable)
+    if exe.name.lower() == "python.exe":
+        pyw = exe.with_name("pythonw.exe")
+        if pyw.exists():
+            exe = pyw
+    return '"%s" -m snapword.gui' % exe
+
+
+def autostart_get():
+    """注册表里那条命令；没开就是 None。"""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            val, _ = winreg.QueryValueEx(k, _RUN_NAME)
+            return val or None
+    except OSError:
+        return None
+
+
+def autostart_enabled():
+    return autostart_get() is not None
+
+
+def autostart_sync():
+    """开着但路径变了（挪了目录 / 换了 venv）就改写成现在的命令。
+
+    不做的话用户挪一次文件夹，开机启动就静默失效了。
+    """
+    cur = autostart_get()
+    if cur is None:
+        return False
+    want = autostart_command()
+    if cur != want:
+        autostart_set(True)
+        return True
+    return False
+
+
+def autostart_set(on):
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+        if on:
+            winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ, autostart_command())
+        else:
+            try:
+                winreg.DeleteValue(k, _RUN_NAME)
+            except FileNotFoundError:
+                pass
+    return autostart_enabled() == bool(on)

@@ -1053,6 +1053,14 @@ class Settings(QtWidgets.QDialog):
         self.auto_detail.setChecked(bool(cfg.get("auto_detail")))
         self.dock = QtWidgets.QCheckBox("挂一个常驻面板在屏幕右边缘（收起时只有一条细边，不用热键）")
         self.dock.setChecked(bool((cfg.get("dock") or {}).get("enabled", True)))
+        # 开机启动：状态以注册表为准（HKCU\...\Run 里那条命令在不在），不在 config 里存一份，
+        # 免得两边不一致。winput.autostart_sync() 会在启动时把挪过目录的旧路径改写掉。
+        self.autostart = QtWidgets.QCheckBox("开机自动启动（登录后就在屏幕右边常驻，不弹窗）")
+        try:
+            self.autostart.setChecked(winput.autostart_enabled())
+        except OSError:
+            self.autostart.setEnabled(False)
+            self.autostart.setText(self.autostart.text() + "（这台机器上写不了注册表）")
         # 挂在哪块屏：默认主屏（"" = 主屏）。以前默认"鼠标所在那块屏"，鼠标在副屏时
         # 面板就跑到副屏去了 —— 用户报的"侧边栏跑我副屏上面去了"。
         primary = QtWidgets.QApplication.primaryScreen()
@@ -1079,6 +1087,7 @@ class Settings(QtWidgets.QDialog):
         f.addRow("", self.auto_detail)
         f.addRow("", self.dock)
         f.addRow("面板挂在哪块屏", self.dock_screen)
+        f.addRow("", self.autostart)
         hint = QtWidgets.QLabel(
             "释义以离线词典 ECDICT 和有道为准，查不到再用百度翻译（要在 fanyi-api.baidu.com "
             "免费领 appid 和密钥）。\n"
@@ -1119,6 +1128,10 @@ class Settings(QtWidgets.QDialog):
         d = c.setdefault("dock", {})
         d["enabled"] = self.dock.isChecked()
         d["screen"] = self.dock_screen.currentData() or None
+        try:
+            winput.autostart_set(self.autostart.isChecked())
+        except OSError:
+            traceback.print_exc()       # 写不了注册表也别把"保存"整个搞失败
         return c
 
 
@@ -1400,6 +1413,11 @@ def run(cfg):
     log = install_crash_log(os.path.dirname(cfg["cache"]))
     log.write("\n=== SnapWord 启动 %s (pid %d) ===\n" % (
         time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid()))
+    try:    # 开着开机启动但路径变了（挪过目录、换过 venv）就改写，不然它会静默失效
+        if winput.autostart_sync():
+            log.write("开机启动的路径变了，已改写为 %s\n" % winput.autostart_command())
+    except OSError:
+        traceback.print_exc()
 
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)

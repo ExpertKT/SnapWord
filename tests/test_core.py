@@ -351,6 +351,34 @@ def test_ocr_bench_classifies_what_went_wrong():
         assert have == want, (expect, got, have, want)
 
 
+def test_autostart_round_trip_leaves_registry_as_it_was():
+    """开关一次要能干净地还原 —— 这个测试动的是真的 HKCU\\...\\Run。
+
+    最要紧的是**别把用户自己开的开机启动搞没**：所以先把原状态记下来，测完还原。
+    """
+    if os.name != "nt":
+        return
+    import winreg
+    from snapword import winput
+
+    before = winput.autostart_get()
+    try:
+        assert winput.autostart_set(True) is True
+        assert winput.autostart_enabled() is True
+        cmd = winput.autostart_get()
+        assert "pythonw.exe" in cmd.lower(), cmd        # 开机启动不能弹黑框
+        assert "-m snapword.gui" in cmd, cmd
+        assert winput.autostart_set(False) is True
+        assert winput.autostart_enabled() is False
+        # 删一个本来就不存在的值也不能炸
+        assert winput.autostart_set(False) is True
+    finally:
+        winput.autostart_set(before is not None)        # 还原
+        if before is not None:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, winput._RUN_KEY) as k:
+                winreg.SetValueEx(k, winput._RUN_NAME, 0, winreg.REG_SZ, before)
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
 
 
