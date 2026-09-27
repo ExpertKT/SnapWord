@@ -1,0 +1,15 @@
+{
+  "name": "dsh-line4-宽留白",
+  "expect": "第一层：现在就能用，而且真有用。你自己的 DSH 装上它，你写 SnapWheel 这种绘制密集型的东西时，agent 能自己截图看渲染结果对不对，",
+  "note": "DSH 聊天正文（真屏幕像素，PrintWindow 抓的）",
+  "rect": [
+    470,
+    958,
+    1690,
+    46
+  ],
+  "dpr": null,
+  "origin": "dsh-window",
+  "size": 16796,
+  "at": "2026-09-27 22:25:46"
+}

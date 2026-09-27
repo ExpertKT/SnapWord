@@ -1,0 +1,30 @@
+# ---- Python ----
+.venv/
+.pipcache/
+__pycache__/
+*.pyc
+
+# ---- 用户自己的状态（每台机器不一样，别提交）----
+config.json
+data/*.db
+data/*.log
+data/tmp/
+
+# OCR 测试台：语料（cases/）留着当回归基准，报告和历史是跑出来的，别提交
+data/ocr-bench/history.jsonl
+data/ocr-bench/REPORT.md
+
+# 词库和模型太大（词库 182MB、模型 165MB），用脚本下：
+#   python tools\fetch_dict.py        离线词典
+#   python tools\fetch_ocr_model.py   OCR 模型
+models/
+data/ecdict.db
+
+# ---- 开发时的临时探针 ----
+tmp/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
