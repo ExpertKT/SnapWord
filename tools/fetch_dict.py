@@ -17,7 +17,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(os.environ.get("SNAPWORD_HOME", r"F:\SnapWord"))
+ROOT = Path(os.environ.get("SNAPWORD_HOME") or Path(__file__).resolve().parents[1])
 DB = ROOT / "data" / "ecdict.db"
 TGZ = ROOT / "data" / "ecdict-npm.tgz"
 URL = ("https://registry.npmmirror.com/node-ecdict-sqlite-lastest/-/"

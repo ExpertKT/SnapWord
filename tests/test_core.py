@@ -379,6 +379,46 @@ def test_autostart_round_trip_leaves_registry_as_it_was():
                 winreg.SetValueEx(k, winput._RUN_NAME, 0, winreg.REG_SZ, before)
 
 
+def _audit():
+    """把 tools/ 挂进来。ocr_audit 模块级只推路径，干活的 import 都在函数里，导入它很便宜。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import ocr_audit
+    return ocr_audit
+
+
+def test_audit_reads_the_two_labels_off_the_model_output():
+    A = _audit()
+    cause, todo = A.parse_answer(
+        "病因：图太扁，文字检测把整行切碎了，只留了中间一块。\n"
+        "下一步：喂之前给上下各补 24px 底色，再跑同一条用例比通过率。")
+    assert "太扁" in cause, cause
+    assert "24px" in todo, todo
+    # 实测有 1/7 条模型把两个标签挤在同一行 —— 别把「下一步」整段吞掉
+    cause, todo = A.parse_answer("病因：引擎把弯曲的笔画当噪点，整个词被丢掉。下一步：放大 2 倍再跑同一条用例。")
+    assert cause == "引擎把弯曲的笔画当噪点，整个词被丢掉。", cause
+    assert "放大 2 倍" in todo, todo
+
+
+def test_audit_never_throws_the_model_output_away():
+    """模型不按格式回答时，整段当病因 —— 宁可格式可疑，也不能把话丢了。"""
+    A = _audit()
+    cause, todo = A.parse_answer("我觉得就是字太小了。")
+    assert cause == "我觉得就是字太小了。", cause
+    assert todo == "", todo
+    assert A.parse_answer("") == ("", "")
+
+
+def test_audit_only_reflects_on_the_latest_record_of_each_case():
+    """每个用例只看**最新**那条；过了的不再翻旧账，没写期望的判不了要跳过。"""
+    A = _audit()
+    hist = [{"case": "a", "ok": False, "expect": "x", "got": "y"},
+            {"case": "a", "ok": True, "expect": "x", "got": "x"},   # a 最新是过的 → 不反思
+            {"case": "b", "ok": False, "expect": "x", "got": "z"},
+            {"case": "c", "ok": False, "expect": "", "got": "z"}]   # 没写期望 → 跳过
+    assert [r["case"] for r in A.latest_failures(hist)] == ["b"]
+    assert [r["case"] for r in A.latest_failures(hist, engine="native")] == []
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
 
 

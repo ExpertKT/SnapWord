@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(os.environ.get("SNAPWORD_HOME", r"F:\SnapWord"))
+ROOT = Path(os.environ.get("SNAPWORD_HOME") or Path(__file__).resolve().parents[1])
 sys.path.insert(0, str(ROOT / "src"))
 
 BENCH = ROOT / "data" / "ocr-bench"
@@ -273,9 +273,12 @@ def write_report(engine, rows):
     L += ["## 怎么迭代", "",
           "1. `collect` 攒**真实框选**的图 —— 合成图骗过我们一次了，别再用它下结论。",
           "2. 跑 `run`，看上面的错法统计，挑出现最多的那一种。",
-          "3. 改 `src/snapword/ocr.py` 的挑选/预处理（或 `lookup.score_ocr` 的打分）。",
-          "4. 再跑 `run` —— 同一个用例的历史会一行行留下来，报告里的通过率就是「改了到底有没有用」的证据。",
-          "5. 只有通过率真的涨了才算修好；不涨就把改动撤掉，别把复杂度留在代码里。", ""]
+          "3. 归类分不出病因时，让**本地模型**把每条失败逐条过一遍：",
+          "   `python tools\\ocr_audit.py`（不联网、不花 token）→ `data\\ocr-bench\\AUDIT.md`；",
+          "   它说的是**假设**，验证还是靠下面第 5 步的通过率。",
+          "4. 改 `src/snapword/ocr.py` 的挑选/预处理（或 `lookup.score_ocr` 的打分）。",
+          "5. 再跑 `run` —— 同一个用例的历史会一行行留下来，报告里的通过率就是「改了到底有没有用」的证据。",
+          "6. 只有通过率真的涨了才算修好；不涨就把改动撤掉，别把复杂度留在代码里。", ""]
     REPORT.write_text("\n".join(L), encoding="utf-8")
 
 

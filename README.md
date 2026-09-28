@@ -118,6 +118,7 @@ models\         OCR 模型（不提交，用下面那个脚本下）
 tools\fetch_dict.py   下 182 MB 的离线词库（走 npm 镜像，1.5 秒）
 tools\fetch_ocr_model.py  下 OCR 模型（快模型 5MB 秒下；--model ppocrv5-server 是那 165MB 的准模型）
 tools\ocr_bench.py    OCR 识别能力的自迭代测试台（判定 + 归因 + 报告）
+tools\ocr_audit.py    OCR 失败反思：把失败条目交给本地 9B 说病因/下一步（不用联网）
 tests\test_core.py    裸断言，无框架：python tests\test_core.py
 docs\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
 ```
@@ -159,7 +160,7 @@ JSON 里多打 `iw/ih/pw/ph` 告诉你补边前后的尺寸。这也是为什么
 ## 自检（改完代码跑这几条）
 
 ```bat
-F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py   :: 19 个裸断言
+F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py   :: 23 个裸断言
 
 :: 让 GUI 自己弹一张卡片，把卡片渲染成 PNG 后退出 —— 不用手动点，也不抓屏
 set SNAPWORD_DEMO=serendipity & set SNAPWORD_SHOT=F:\SnapWord\tmp\card.png
@@ -180,6 +181,7 @@ python -m snapword.cli gui
 :: OCR 认得准不准：判定 + 归因 + 通过率，一次跑完（详见 docs\OCR-NOTES.md）
 python tools\ocr_bench.py run            :: 加 --engine native 只看单个引擎
 python tools\ocr_bench.py report         :: 看通过率随时间怎么变
+python tools\ocr_audit.py                :: 失败的条目交给本地 9B 逐条说病因（不联网、不花 token）
 ```
 
 两个 demo 都会把面板几何打出来（`右边缘=2048 屏右边缘=2048 贴边=True`），
@@ -207,6 +209,26 @@ python tools\ocr_bench.py run                              :: 判定 + 按错法
 **合成图会骗人**（一开始拿合成图自测全过，用户一框就出半截词），所以语料要真框。
 失败会按"错成什么样"归成空 / 只有一个字 / 太短 / 截断 / 丢开头 / 中文错字 / 空格差 / 字符替换，
 每一类都给出下一步该试什么。完整实测记录见 `docs\OCR-NOTES.md`。
+
+### 「归类」之后的下一步，交给本机那个 9B 想
+
+归类是**正则**做的（错成什么样 → 该试什么），它分不出「同一类错、不同原因」：
+10px 的英文和 1690×46 的整行中文都会归到"截断"，但该试的东西完全不同。
+所以还有一环 `tools\ocr_audit.py`：
+
+```bat
+python tools\ocr_audit.py              :: 把最近一次 run 的失败条目逐条喂给本地 qwen3.5:9b
+python tools\ocr_audit.py --dry-run    :: 只打 prompt（调提示词用）
+python tools\ocr_audit.py --limit 3 --engine native
+```
+
+它**完全本地**（打 `http://127.0.0.1:11434`，不联网、不花 token），逐条打印
+`[i/n] 用例 期望→实得 / 病因 / 下一步`，产物是 `data\ocr-bench\AUDIT.md`
+（每条跟着复现命令和这个用例最近几次的通过序列 `.x..`）。
+
+**它说的话是假设，不是事实** —— 9B 会一本正经地编。验证手段仍然是 `ocr_bench.py run`
+的通过率：AUDIT.md 里有「历次建议」表，上次照它做有没有用，对着通过序列看得很清楚。
+没跑 Ollama 会直接提示 `ollama serve`，不会让你干等超时。
 
 ## 网络（这台机器上的实测值）
 

@@ -199,6 +199,26 @@
 - 首次基准（14 条合成用例）：native 9/14、system 7/14、**auto 14/14**。
 - 改了 OCR 挑选/预处理/打分，**必须**跑 `run` 看通过率是不是真的涨了；不涨就撤改动。
 
+### 反思那一半 `tools/ocr_audit.py`（让本地 9B 干活）
+用户 m02447 明确要求的：**"把本地模型调动起来，并且有反馈"**。上面那半只在"错成什么样 →
+该试什么"这一层（**正则**归的类），同一类错不同原因时给的建议是错的 —— 实测：强制 `system`
+跑出来的 3 条 `cjk-confusion` 全被建议"去修 system"，而正确动作其实在 `auto` 的阶梯上。
+所以失败条目再交给本机 `qwen3.5:9b` 逐条看：
+
+- 事实进、两行出：把「期望/实得、引擎、耗时、图的宽高比、用例来路、正则归类、最近几次通过序列」
+  拼成 prompt，要求只答 `病因：…` / `下一步：…`。
+- 两个必须写进 prompt 的事实，否则结论会跑偏：①**这次是指定引擎跑的、不是 auto 选的**
+  （`--engine X` 的失败不等于 auto 会选 X）；②**图的长宽比**（1690×46 和 132×30 的"截断"不是一个病）。
+- 完全本地：`providers.ollama_chat`（内部带 `reasoning_effort:"none"`，不带这个 9B 返回空）。
+  跑之前先 `providers.ollama_up()` 探活，没开就提示 `ollama serve` 直接退，不干等 90 秒超时。
+- 解析**宽松到底**：标签可能被模型挤在同一行（实测 7 条里 1 条），先按标签强行断行再解析；
+  一个标签都没有就把整段当"病因"——**宁可格式可疑，也不把模型说的话丢掉**。
+- **它的话是假设不是事实**（实测它会编机制，比如"auto 因耗时 238ms 跳过了 native"）。
+  产物 `data\ocr-bench\AUDIT.md` 每条都跟着复现命令 + 该用例历史通过序列，末尾有「历次建议」表：
+  **上次照它做有没有用，对着通过序列看**。验证手段还是 `run` 的通过率。
+- 实测：7 条失败 12~79 秒（首条冷 20 秒，后面 1~2 秒），7/7 都给出了下一步。
+- `AUDIT.md` / `audit.jsonl` **必须 gitignore**：expect 里是屏幕截到的原文（含私人路径/聊天）。
+
 ## 常驻面板 `gui.Dock`（用户要的"挂在右边、不依赖热键"）
 
 贴着屏幕右边缘的一个 26px 细边，点一下展开成 320+32 宽的面板。**收起状态就是全部界面**，
@@ -324,7 +344,8 @@ git push -u origin main
 
 **故意不提交**：`.venv/`、`models/`（165 MB，用 `tools\fetch_ocr_model.py` 下）、
 `data\ecdict.db`（182 MB，用 `tools\fetch_dict.py` 下）、`config.json`（每台机器不一样）、
-`data\cache.db`、`data\snapword.log`、`tmp/`、`data\ocr-bench\{history.jsonl,REPORT.md}`（跑出来的）。
+`data\cache.db`、`data\snapword.log`、`tmp/`、
+`data\ocr-bench\{history.jsonl,REPORT.md,AUDIT.md,audit.jsonl}`（都是跑出来的；后两个还引用截屏原文）。
 
 发布前要确认的三条：① `git status` 干净；② `config.json` 没被跟踪（里面有用户自己的 key）；
 ③ README 里那五步在一台干净机器上真的能跑（只有 `python -m venv` + pip 是外部依赖）。

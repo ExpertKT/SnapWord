@@ -13,6 +13,9 @@ data/tmp/
 # OCR 测试台：语料（cases/）留着当回归基准，报告和历史是跑出来的，别提交
 data/ocr-bench/history.jsonl
 data/ocr-bench/REPORT.md
+# 本地模型的反思报告：引用失败用例的期望文本，可能夹带私人内容（屏幕截图里的路径/聊天）
+data/ocr-bench/AUDIT.md
+data/ocr-bench/audit.jsonl
 
 # 从真实屏幕框选出来的语料含私人内容（聊天记录、路径），只留在本机
 data/ocr-bench/cases/dsh-*/
