@@ -419,6 +419,52 @@ def test_audit_only_reflects_on_the_latest_record_of_each_case():
     assert [r["case"] for r in A.latest_failures(hist, engine="native")] == []
 
 
+def test_fade_in_passes_over_layouts_instead_of_crashing():
+    """hy4 评审第 1 条：`_fade_in` 拿到 QHBoxLayout 会 AttributeError。
+
+    这一行以前在 `show()` 之前炸，结果**多词短语整个卡片都不出现**，pythonw 下连报错都
+    看不见。挡在根上：不是控件就什么都不做。
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qw = _qt()
+    from snapword.gui import _fade_in
+    _fade_in(qw.QHBoxLayout())                     # 不许抛
+    _fade_in(qw.QHBoxLayout(), 0)                  # 也不许抛
+    w = qw.QWidget()
+    _fade_in(w, 0)
+    w.deleteLater()
+
+
+def test_detail_button_comes_back_after_the_answer():
+    """hy4 评审第 4 条：详解按钮以前永远停在「生成中…」，成功也一样。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _qt()
+    from snapword.gui import Card
+    c = Card()
+    c.btn_detail.setEnabled(False)
+    c.btn_detail.setText("生成中…")
+    c.set_detail("# 详解", None)                    # 成功这条路
+    assert c.btn_detail.isEnabled(), "详解回来了按钮还是禁用的"
+    assert c.btn_detail.text() == "详细解释", c.btn_detail.text()
+    c.btn_detail.setEnabled(False)
+    c.btn_detail.setText("生成中…")
+    c.set_detail(None, "模型没返回")                 # 失败这条路也得还原
+    assert c.btn_detail.isEnabled(), "失败之后按钮还是禁用的"
+    assert c.btn_detail.text() == "详细解释", c.btn_detail.text()
+    c.deleteLater()
+
+
+QtApp = None
+
+
+def _qt():
+    """按需起一个 offscreen QApplication（只起一次）。"""
+    global QtApp
+    from PySide6 import QtWidgets
+    QtApp = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    return QtWidgets
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
 
 

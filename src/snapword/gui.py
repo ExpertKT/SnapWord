@@ -75,6 +75,10 @@ def _fade_in(w, ms=150):
     用完必须把 effect 摘掉（`setGraphicsEffect(None)`）—— 挂着 `QGraphicsOpacityEffect`
     的控件以后走软件渲染，白拖性能。用完就摘也就不会和 `_shadow()` 抢同一个 effect。
     """
+    if not isinstance(w, QtWidgets.QWidget):
+        # 布局不是控件，没有 setGraphicsEffect。这里挡一道，别让一次手滑把整张卡片
+        # 卡在 show() 之前（hy4 评审第 1 条踩的就是这个：传了 QHBoxLayout）。
+        return
     eff = QtWidgets.QGraphicsOpacityEffect(w)
     w.setGraphicsEffect(eff)
     a = QtCore.QPropertyAnimation(eff, b"opacity", w)
@@ -378,9 +382,15 @@ class Card(QtWidgets.QWidget):
         self.lb_text.hide()
         v.addWidget(self.lb_text)
 
-        self.chips = QtWidgets.QHBoxLayout()
+        # 词按钮那一行。特意包一层 QWidget：`_fade_in()` 只认控件，直接对 QHBoxLayout
+        # 调 setGraphicsEffect 会 AttributeError，而那一炸发生在 `show()` 之前 ——
+        # 查短语/整句时整张卡片都不出来（hy4 评审第 1 条，已复现）。
+        self.chips_box = QtWidgets.QWidget()
+        self.chips = QtWidgets.QHBoxLayout(self.chips_box)
+        self.chips.setContentsMargins(0, 0, 0, 0)
         self.chips.setSpacing(4)
-        v.addLayout(self.chips)
+        self.chips_box.setVisible(False)      # 没词就别占那一行
+        v.addWidget(self.chips_box)
 
         self.lb_cn = QtWidgets.QLabel("", objectName="cn")
         self.lb_cn.setWordWrap(True)
@@ -486,7 +496,7 @@ class Card(QtWidgets.QWidget):
         self.lb_en.setVisible(bool(brief.get("en")))
         notes = list(brief.get("notes") or [])
         if brief.get("cached"):
-            notes.append("来自本地缓存（没再联网、没再花 token）")
+            notes.append("来自本地缓存（没再花 token）")
         if brief.get("exchange"):
             notes.append("变形：" + brief["exchange"])
         self.lb_note.setText(" · ".join(notes))
@@ -520,6 +530,10 @@ class Card(QtWidgets.QWidget):
         self._resize_keep_place()
 
     def set_detail(self, md, err=None):
+        # 收尾的人负责把按钮还原。以前这里不还原、只有下一次查词才 setEnabled(True)，
+        # 于是文案永远停在「生成中…」，下一个词点不动详解（hy4 评审第 4 条）。
+        self.btn_detail.setEnabled(True)
+        self.btn_detail.setText("详细解释")
         self.detail.show()
         if md:
             self.detail.setMarkdown(md)
@@ -556,6 +570,7 @@ class Card(QtWidgets.QWidget):
 
     def _fill_chips(self, text):
         toks = [t for t in re.findall(r"[A-Za-z][A-Za-z'\-]{1,}", text)][:12]
+        self.chips_box.setVisible(len(toks) >= 2)     # 没有词就整行收掉，不占高度
         if len(toks) < 2:
             return
         for t in toks:
@@ -563,7 +578,7 @@ class Card(QtWidgets.QWidget):
             b.setToolTip("查这个单词")
             b.clicked.connect(lambda _=False, w=t: self.word_clicked.emit(w))
             self.chips.addWidget(b)
-        _fade_in(self.chips, DUR["base"])
+        _fade_in(self.chips_box, DUR["base"])
 
     def _clear_chips(self):
         while self.chips.count():
@@ -930,7 +945,7 @@ class Dock(QtWidgets.QWidget):
         if scr is None:
             return
         g = scr.availableGeometry()      # 扣掉任务栏那一条（这台机器上任务栏自动隐藏，等于全屏）
-        W = self.PANEL_W + self.RAIL_W
+        W = self.PANEL_W + 6 + self.RAIL_W      # panel 320 + 6px 缝 + rail 26 = 352（rail 别被窗口裁掉）
         h = self.PANEL_H
         y = g.y() + (g.height() - h) // 2 if self._y is None else int(self._y)
         y = min(max(g.y(), y), max(g.y(), g.y() + g.height() - h))
@@ -1186,18 +1201,19 @@ class App(QtCore.QObject):
         at = QtGui.QCursor.pos()
         self._last_at = at
         self._ocr_info = None
-        self._ensure_card(pos=at).show_brief(
+        card = self._ensure_card(pos=at)
+        card.show_brief(
             {"query": "识别中…", "cn": [], "kind": "word", "source": "…"}, at=at)
         png = pixmap_png(pixmap)
-        self._run(self._ocr_then_lookup, png)
+        self._run(self._ocr_then_lookup, png, card=card)
 
     def lookup_text(self, text, at=None):
         text = (text or "").strip()
         if not text:
             return
         self._ocr_info = None
-        self._ensure_card(pos=at or QtGui.QCursor.pos())
-        self._run(self._lookup_brief, text, at)
+        card = self._ensure_card(pos=at or QtGui.QCursor.pos())
+        self._run(self._lookup_brief, text, at, card=card)
 
     def on_hotkey(self, name):
         if name is None:
@@ -1233,29 +1249,36 @@ class App(QtCore.QObject):
             self.start_pick()
 
     # ---------- 后台任务 ----------
-    def _run(self, fn, *args, **kw):
+    def _run(self, fn, *args, card=None, **kw):
+        """card=：这个任务的结果回哪张卡片；不传就等于"当前那张"（老行为）。
+
+        为什么必须能传：结果一律投给 `self.current` 的话，钉住旧卡再点「详细解释」，
+        转圈和答案会跑到最新那张卡上，旧卡毫无反应（hy4 评审第 3 条）。
+        """
         j = Job(fn, *args, stream=bool(kw.pop("stream", False)), **kw)
-        j.done.connect(lambda r, f=fn: self._on_job_done(f, r))
-        j.fail.connect(lambda e, f=fn: self._on_job_fail(f, e))
-        j.progress.connect(lambda p, f=fn: self._on_job_progress(f, p))
+        j.done.connect(lambda r, f=fn, c=card: self._on_job_done(f, r, c))
+        j.fail.connect(lambda e, f=fn, c=card: self._on_job_fail(f, e, c))
+        j.progress.connect(lambda p, f=fn, c=card: self._on_job_progress(f, p, c))
         j.finished.connect(lambda j=j: self._jobs.remove(j) if j in self._jobs else None)
         self._jobs.append(j)
         j.start()
 
-    def _on_job_progress(self, fn, piece):
+    def _on_job_progress(self, fn, piece, card=None):
         """流式回答：先来 ("src", 谁在答)，之后是一段段 ("text", 正文)。"""
-        if getattr(fn, "__name__", "") != "_ask_stream" or not self.current:
+        card = card if card is not None else self.current
+        if getattr(fn, "__name__", "") != "_ask_stream" or not card:
             return
         kind, val = piece
         if kind == "src":
             self._ask_started = True
             who = "AI（DeepSeek）" if val == "deepseek" else "AI（本地 9B）"
-            self.current.chat_begin(who)
+            card.chat_begin(who)
         elif kind == "text":
-            self.current.chat_push(str(val))
+            card.chat_push(str(val))
 
-    def _on_job_done(self, fn, result):
+    def _on_job_done(self, fn, result, card=None):
         name = getattr(fn, "__name__", "")
+        card = card if card is not None else self.current
         if name == "_ocr_then_lookup":
             r = result
             if not r.get("ok"):
@@ -1268,30 +1291,37 @@ class App(QtCore.QObject):
             self._ocr_info = {"name": OCR_ENGINE_CN.get(r.get("engine"), r.get("engine")),
                               "ms": r.get("ms")}
             self.brief_cache["_last_text"] = text
-            self._run(self._lookup_brief, text, getattr(self, "_last_at", None))
+            self._run(self._lookup_brief, text, getattr(self, "_last_at", None), card=card)
         elif name == "_lookup_brief":
             brief, text, at = result
-            self._show_brief(brief, text, at)
+            self._show_brief(brief, text, at, card=card)
         elif name == "_lookup_enrich":
-            if self.current:
-                self.current.set_enrich(result)
+            if card:
+                card.set_enrich(result)
         elif name == "_lookup_detail":
             md, err = result
-            if self.current:
-                self.current.set_detail(md, err)
+            if card:
+                card.set_detail(md, err)
         elif name == "_ask_stream":
-            if self.current:
-                self.current._resize_keep_place()   # 收尾时按最终高度定一次
+            # 收尾全在主线程做：流式回答的对话历史不能从 worker 线程改（hy4 评审第 10 条）
+            if card:
+                self._chat_hist.append({"role": "user", "content": getattr(self, "_ask_q", "")})
+                self._chat_hist.append({"role": "assistant", "content": str(result)})
+                del self._chat_hist[:-8]
+                card.chat_in.setEnabled(True)    # 答完了，放开输入框
+                card._resize_keep_place()        # 收尾时按最终高度定一次
 
-    def _on_job_fail(self, fn, err):
+    def _on_job_fail(self, fn, err, card=None):
         name = getattr(fn, "__name__", "")
-        if name == "_ask_stream" and self.current:
+        card = card if card is not None else self.current
+        if name == "_ask_stream" and card:
+            card.chat_in.setEnabled(True)
             if not getattr(self, "_ask_started", False):
-                self.current.chat_begin("系统")      # 一个字都没来得及吐：先开气泡再说
-            self.current.chat_push("出错了：" + err)
-            self.current._resize_keep_place()
-        elif self.current:
-            self.current.set_detail(None, err)
+                card.chat_begin("系统")          # 一个字都没来得及吐：先开气泡再说
+            card.chat_push("出错了：" + err)
+            card._resize_keep_place()
+        elif card:
+            card.set_detail(None, err)
 
     # ---------- 这些在后台线程里跑 ----------
     def _ocr_then_lookup(self, png):
@@ -1323,18 +1353,12 @@ class App(QtCore.QObject):
     def _ask_stream(self, brief, q, escalate):
         """后台线程里跑的流式答疑：一个字一个字地 yield 给 Job 转发到界面。
 
-        顺手把这轮问答记进 self._chat_hist（只留最近 8 条），这样追问「再举个例子」
-        模型知道上文。换词查时 _show_brief 会把历史清掉。
+        这里**只读**对话历史（`list(...)` 快照），不写 —— 写回主线程的收尾里做
+        （见 `_on_job_done` 的 `_ask_stream` 分支），否则换词的瞬间会和主线程抢同一个列表。
         """
-        buf = []
         for kind, val in self.lookup.ask_stream(brief, q, list(self._chat_hist),
                                                 escalate=escalate):
-            if kind == "text":
-                buf.append(val)
             yield (kind, val)
-        self._chat_hist.append({"role": "user", "content": q})
-        self._chat_hist.append({"role": "assistant", "content": "".join(buf)})
-        del self._chat_hist[:-8]
 
     # ---------- 卡片管理 ----------
     def _ensure_card(self, pos=None):
@@ -1342,8 +1366,9 @@ class App(QtCore.QObject):
             return self.current
         c = Card()
         c.closed.connect(self._on_card_closed)
-        c.detail_requested.connect(self._on_detail)
-        c.ask_requested.connect(self._on_ask)
+        # 绑定 card：结果回发起那一次交互的卡片，而不是"最新那张"（hy4 评审第 3 条）
+        c.detail_requested.connect(lambda b, c=c: self._on_detail(c, b))
+        c.ask_requested.connect(lambda b, q, e, c=c: self._on_ask(c, b, q, e))
         c.word_clicked.connect(lambda w: self.lookup_text(w))
         self.cards.append(c)
         self.current = c
@@ -1356,29 +1381,38 @@ class App(QtCore.QObject):
             self.current = self.cards[-1] if self.cards else None
         self._sync_esc()
 
-    def _on_detail(self, brief):
-        if not brief:
+    def _on_detail(self, card, brief):
+        if not brief or card is None:
             return
-        self.current.btn_detail.setEnabled(False)
-        self.current.btn_detail.setText("生成中…")
-        self.current.detail.show()
-        self.current.detail.setPlainText("本地模型/DeepSeek 正在整理…")
-        self.current._resize_keep_place()
-        self._run(self._lookup_detail, brief)
+        card.btn_detail.setEnabled(False)
+        card.btn_detail.setText("生成中…")
+        card.detail.show()
+        card.detail.setPlainText("本地模型/DeepSeek 正在整理…")
+        card._resize_keep_place()
+        self._run(self._lookup_detail, brief, card=card)
 
-    def _on_ask(self, brief, q, escalate):
+    def _on_ask(self, card, brief, q, escalate):
         # 谁来答由 lookup.ask_plan 决定：本地 9B 在跑就用它，没在跑就自动上网（填了 key 的话）。
+        if card is None:
+            return
+        self._ask_q = q                     # 收尾时补进对话历史（_on_job_done）
         self._ask_started = False
-        self._run(self._ask_stream, brief, q, escalate, stream=True)
+        card.chat_in.setEnabled(False)      # 防重入：回答没回来前别再发第二条（评审第 7 条）
+        self._run(self._ask_stream, brief, q, escalate, stream=True, card=card)
 
-    def _show_brief(self, brief, text, at):
+    def _show_brief(self, brief, text, at, card=None):
+        card = card if card is not None else self.current
+        if card is None:
+            # 卡片已经被关了，结果没地方投 —— 以前这里会 AttributeError，
+            # 结果被静默丢掉（hy4 评审第 2 条）。
+            return
         self._chat_hist = []        # 换词了，之前的追问上下文作废
-        self.current.show_brief(brief, text=text, at=at)
-        self.current.btn_detail.setEnabled(True)
+        card.show_brief(brief, text=text, at=at)
+        card.btn_detail.setEnabled(True)
         if self.cfg.get("auto_detail") and (brief.get("cn") or brief.get("en")):
-            self._on_detail(brief)
+            self._on_detail(card, brief)
         else:
-            self._run(self._lookup_enrich, brief)
+            self._run(self._lookup_enrich, brief, card=card)
         self._sync_esc()
 
     def _card_msg(self, title, msg):
@@ -1431,6 +1465,7 @@ def run(cfg):
     ctrl.lookup = lookup
 
     def on_settings():
+        old_screen = (cfg.get("dock") or {}).get("screen") or ""
         d = Settings(cfg, dock=dock)
         if d.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             new = d.apply()
@@ -1440,31 +1475,44 @@ def run(cfg):
                 dock.set_enabled(bool((new.get("dock") or {}).get("enabled", True)))
             QtWidgets.QMessageBox.information(
                 None, "SnapWord", "已保存。热键的改动要重启才生效。")
+        elif dock:
+            # 换屏是"立刻预览"的（见 Settings 里的注释），点取消就把它收回去，
+            # 否则取消之后面板留在新屏上、config 也被预览值改掉了（hy4 评审第 9 条）。
+            dock.set_screen(old_screen)
 
     def on_quit():
         try:
             ctrl._esc_thread and ctrl._esc_thread.stop()
         finally:
+            # 先把在后台跑的线程收干净再拆进程：QThread 还在跑就把进程结束掉会直接崩
+            # （复现过：exit code 0xC0000409，并打印 "QThread: Destroyed while thread is
+            # still running"。流式回答/慢 OCR 期间点托盘退出就会踩到）
+            deadline = time.monotonic() + 1.5
+            for j in list(ctrl._jobs):
+                left = int((deadline - time.monotonic()) * 1000)
+                if left > 0:
+                    j.wait(left)
             QtWidgets.QApplication.quit()
 
     tray = Tray(ctrl, cfg["hotkey"], on_settings, on_quit)
     tray.show()
     ctrl.tray = tray
 
-    # 屏幕右边缘的常驻面板 —— 这是"不依赖热键"的那条路
-    dock = None
-    if (cfg.get("dock") or {}).get("enabled", True):
-        def on_clip():
-            ctrl.lookup_text(QtWidgets.QApplication.clipboard().text(),
-                             at=dock.anchor() if dock else None)
+    # 屏幕右边缘的常驻面板 —— 这是"不依赖热键"的那条路。
+    # 面板**无条件建**：enabled=False 只是不显示它，托盘里的「显示常驻面板」必须一直在，
+    # 否则关掉它以后本次会话就再也打不开了（要重启；hy4 评审第 6 条）。
+    def on_clip():
+        ctrl.lookup_text(QtWidgets.QApplication.clipboard().text(),
+                         at=dock.anchor() if dock else None)
 
-        dock = Dock(cfg, ctrl.start_pick,
-                    lambda t: ctrl.lookup_text(t, at=dock.anchor()),
-                    on_clip, on_settings, on_quit)
-        dock.set_hint("热键：%s 框选屏幕。不想记热键就用上面的按钮。" % cfg["hotkey"])
+    dock = Dock(cfg, ctrl.start_pick,
+                lambda t: ctrl.lookup_text(t, at=dock.anchor()),
+                on_clip, on_settings, on_quit)
+    dock.set_hint("热键：%s 框选屏幕。不想记热键就用上面的按钮。" % cfg["hotkey"])
+    ctrl.dock = dock
+    tray.attach_dock(dock)      # 托盘里能开关面板、换屏、展开收起
+    if (cfg.get("dock") or {}).get("enabled", True):
         dock.show()
-        ctrl.dock = dock
-        tray.attach_dock(dock)      # 托盘里能开关面板、换屏、展开收起
 
     def chain(preferred, alts):
         return [preferred] + [a for a in alts if a != preferred]
@@ -1568,7 +1616,15 @@ def run(cfg):
     if not lookup.dic.available:
         tray.showMessage("SnapWord", "还没建离线词典：跑一下 tools\\fetch_dict.py（走 npm 镜像下 182 MB 词库）。",
                          QtWidgets.QSystemTrayIcon.MessageIcon.Warning, 8000)
-    return app.exec()
+    rc = app.exec()
+    # 兜底：退出时还有线程没停下来（流式回答卡在网络上、OCR 卡在 helper 上）。on_quit 已经
+    # 等过 1.5 秒，这里对剩下的**强杀**——让 Qt 去析构一个还在跑的 QThread 会直接 abort
+    # （复现过 exit 0xC0000409）。进程都要没了，强杀比崩溃体面。
+    for j in list(ctrl._jobs):
+        if j.isRunning():
+            j.terminate()
+            j.wait(500)
+    return rc
 
 
 if __name__ == "__main__":
