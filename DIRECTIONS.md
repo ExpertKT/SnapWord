@@ -285,7 +285,7 @@
 ## 怎么验证（改完必须跑的那几样）
 
 ```bat
-:: 1. 纯逻辑（无框架裸断言，秒出，19 个）
+:: 1. 纯逻辑（无框架裸断言，秒出，23 个）
 F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py
 
 :: 1b. OCR 认得准不准（判定 + 归因 + 通过率；改了 OCR 就必须跑，不涨就撤）
