@@ -1577,6 +1577,11 @@ def run(cfg):
                     c._send(False)
 
                 QtCore.QTimer.singleShot(1200, _ask_demo)
+            elif demo == "settings":
+                # 设置对话框也要能截图：on_settings 用的是 exec()，会停在嵌套事件循环里，
+                # 定时器抓不到它；这里非模态 show() 出来，_shot 就能 grab。
+                ctrl._dlg_shown = Settings(cfg, dock=dock)
+                ctrl._dlg_shown.show()
             elif demo.startswith("ocr"):
                 # 造一张写着某个词的图，直接喂给"框选完"那一步：
                 # 走的是真路径（画图 -> pixmap_png -> ocr-helper.exe -> 查词 -> 卡片）
@@ -1597,7 +1602,8 @@ def run(cfg):
         shot = os.environ.get("SNAPWORD_SHOT")
         if shot:
             def _shot():
-                w = ctrl.dock if demo.startswith("dock") else ctrl.current
+                w = ctrl.dock if demo.startswith("dock") else (
+                    ctrl.selector or getattr(ctrl, "_dlg_shown", None) or ctrl.current)
                 if w and ctrl.dock:
                     # 几何只看这里：展开/收起是 180ms 动画，_demo_start 里那会儿还没走完。
                     sc = ctrl.dock._screen()

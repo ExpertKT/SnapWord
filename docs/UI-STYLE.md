@@ -52,7 +52,7 @@
 
 | 场景 | 时长 | 缓动 | 做法 |
 | --- | --- | --- | --- |
-| 面板展开 / 收起 | 180ms | OutCubic | 动窗口的 `geometry`（尺寸不变，只滑 x） |
+| 面板展开 / 收起 | 180ms | OutCubic | 动窗口的 `geometry`：宽度在 26 ↔ 352 两个确定值之间走，panel 同时在窗口内从 x=W 滑到 0（rail 永远贴窗口最右 26px） |
 | 卡片弹出 | 180ms | OutCubic | 透明度 0→1 + y 从 `at.y()+10` 滑上来 |
 | 卡片关闭 | 120ms | InCubic | 透明度 1→0，结束后才 `hide()` |
 | 卡片长高（展开详解/对话） | 160ms | OutCubic | 动 `geometry` 的高度，锚定左上角 |
@@ -73,7 +73,7 @@
 | --- | --- |
 | 令牌 `T` / 时长 `DUR` | `gui.py` 顶部，`QSS = Template(...).substitute(T)` |
 | 投影 `_shadow(w)` | 只给 `Card.frame`（`outer` 留 8/8/8/12 的边距让它画出来）；**Dock 面板不加**——贴屏幕边会被切 |
-| 面板展开/收起 | `Dock._place()` + `_settle()`，只动 panel 的 x（窗口宽度恒定，rail 全程可见） |
+| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度在 26 ↔ 352 之间走，panel 的 x 同步从 W 滑到 0；rail 全程贴住窗口右缘（不能用 layout：窗口一变窄 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释） |
 | 卡片弹出 / 关闭 / 长高 | `Card.show_brief()` / `hide_card()+_really_hide()` / `_resize_keep_place()` |
 | 托盘菜单三项 | `Tray.attach_dock()`（显示常驻面板 / 展开收起 / 面板挂在哪块屏） |
 | 还没做 | 托盘 QMenu 与设置 QDialog 的进出场动画、`QGraphicsDropShadowEffect` 实测只有一层 |
