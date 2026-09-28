@@ -119,6 +119,8 @@ tools\fetch_dict.py   下 182 MB 的离线词库（走 npm 镜像，1.5 秒）
 tools\fetch_ocr_model.py  下 OCR 模型（快模型 5MB 秒下；--model ppocrv5-server 是那 165MB 的准模型）
 tools\ocr_bench.py    OCR 识别能力的自迭代测试台（判定 + 归因 + 报告）
 tools\ocr_audit.py    OCR 失败反思：把失败条目交给本地 9B 说病因/下一步（不用联网）
+tools\make_icon.py    生成 assets\snapword.ico（和托盘图标同一套画法，桌面快捷方式用）
+assets\snapword.ico   应用图标（想在桌面放快捷方式就指到 .venv\Scripts\pythonw.exe -m snapword.gui）
 tests\test_core.py    裸断言，无框架：python tests\test_core.py
 docs\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
 ```
