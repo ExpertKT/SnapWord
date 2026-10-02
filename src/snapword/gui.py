@@ -1112,7 +1112,7 @@ class Card(QtWidgets.QWidget):
         # 会不存在 → queue_reveal 直接 AttributeError（实测挂了 3 条断言）。
         self._resizing = False           # 长高动画进行中
         self._resize_again = False       # 长高期间内容又变了，结束后再量一次
-        self._anim_h = None              # 长高动画当前高度（被原生 resize 拽走时拉回）
+        self._anim_h = None              # 长高动画当前高度（布局偶尔把窗口顶到终点，用来拉回）
         self._reveal_queue = []          # 等长高 done 才淡入的控件
         self._reveal_retries = 0         # 见 _after_grow：重排次数上限，防止内容永远透明
         self._staggered = []
@@ -1552,16 +1552,16 @@ class Card(QtWidgets.QWidget):
             _later(DUR["slow"], self, self._after_grow)
 
     def _stop_grow(self):
-        """掐掉长高动画，并把它留下的两个闸门**一并复位**。
+        """掐掉长高动画，并把它留下的闸门**一并复位**。
 
-        长高动画期间窗口的最大高度被钉在当前动画值上（挡那次延后的布局请求）。动画正常
-        结束时由 `_resized()` 放开；但被 stop 打断时 `finished` 不发，上限就永久留着了——
-        实测卡在 261px：之后复用这张卡弹一个长卡片，窗口被钳成 261，底部的复制/钉住按钮
-        落在 y=558，**在窗口外，既看不见也点不到**（用户报的"详解生成时不能复制不能钉住"）。
-        所以掐动画必须连上限和 `_resizing` 一起复位。
+        动画正常结束时这些闸门由 `_resized()` 复位；被 stop 打断时 `finished` 不发，
+        就永久留着了 —— 实测窗口被钳在 261px：之后复用这张卡弹一个长卡片，窗口长不高，
+        底部的复制/钉住按钮落在 y=558，**在窗口外，既看不见也点不到**（用户报的
+        "详解生成时不能复制不能钉住"）。
+        所以掐动画必须连 `_resizing` 和 `_anim_h` 一起复位。（当年那个"钳住的高度"是
+        窗口的 maximumHeight，现在已经不钉了 —— 改由 frame 跟着动画走，见 `_guard`。）
         """
         _stop_anims(self, b"geometry")
-        self.setMaximumHeight(16777215)
         self._anim_h = None
         self._resizing = False
         self._resize_again = False
@@ -1622,6 +1622,10 @@ class Card(QtWidgets.QWidget):
         self._clear_stagger()
         self._resizing = True
         self.resize(self.width(), old)
+        # 起点先把 frame 压回"当前窗口"该有的高度：窗口长高、内容被揭开。
+        # （_fit_height 量完会把 frame 钉在**终点**高度上，那是它量高度用的手段，
+        #   动画期间必须由下面每帧的 _guard 抢回来。）
+        self.frame.setFixedHeight(max(1, old - 20))
         # 终点 y 按**新高度**重新夹一次：卡片贴着屏幕底部时向下长会掉出屏幕
         # （实测长释义就掉出去 148px）。所以长高的同时把卡片往上带，动画里一起走。
         tx, ty = self._clamp_pos(new, pos.x(), pos.y())
@@ -1632,29 +1636,37 @@ class Card(QtWidgets.QWidget):
 
         def _guard(v, card=self):
             card._anim_h = int(v.height())
-            # 有个延后的布局请求会在动画中途被处理，一帧把窗口拽到终点（离屏上还能看到
-            # 几帧中间值，真机上基本整段动画都被它吃掉）。把最大高度钉在当前动画值，
-            # 外部那一下就被挡住了；动画结束再放开（见 _resized）。
+            # 让 frame 的高度**跟着动画走**，而不是把它自己钉在终点。
+            #
+            # 这里原来钉的是窗口的 maximumHeight，挡不住：窗口的延后布局激活是拿 frame 的
+            # 固定高度当 sizeHint 去 resize 窗口的 —— _fit_height 量完就在那一瞬间把终点
+            # 告诉了布局，于是动画中途窗口被一帧拽到终点（实测 want=304 时窗口 h=574，
+            # 43 条「Unable to set geometry」、16 次回落，整段动画的中间值全被吃掉）。
+            # frame 跟着动画走之后，布局想要的**永远接近**当前动画值（实测只超前 ≤75px），
+            # 那一下就不存在了；剩下偶尔超前的那一下由下面的 resizeEvent 在同一事件里
+            # 拉回，所以真机上既看不到拽到终点、也看不到回落。
             try:
-                card.setMaximumHeight(max(1, int(v.height())))
+                card.frame.setFixedHeight(max(1, int(v.height()) - 20))
             except RuntimeError:      # 卡片已经关掉了
                 pass
 
         a.valueChanged.connect(_guard)
-        self.setMaximumHeight(max(1, old))   # 先钉在起点：挡住动画第一次推进之前的那一下跳跃
 
     def resizeEvent(self, e):
-        # 动画期间会有一次**原生窗口的自发 resize**（不走 Qt 的 setGeometry，所以钉最大高度
-        # 挡不住）把窗口拽到终点。这里在同一事件里立刻拉回动画当前值，把它压成一帧以内。
+        # 延后布局激活偶尔会把窗口**一次性顶到终点**（实测那一下 48px：先冲高、下一帧再缩回
+        # 继续长），一帧的闪动在真机上看得见。这里在同一个事件里立刻拉回动画当前值，
+        # 把它压成看不见的一次 setGeometry。
         if getattr(self, "_resizing", False):
             want = getattr(self, "_anim_h", None)
-            if want and abs(self.height() - want) > 4:
+            if want and self.height() - want > 4:
                 self.resize(self.width(), want)
                 return
         super().resizeEvent(e)
 
     def _resized(self):
-        self.setMaximumHeight(16777215)     # 放开动画期间钉住的高度上限
+        # 动画收尾：把 frame 钉在终点高度上（动画期间它是跟着窗口走的，终点必须与窗口严丝合缝，
+        # 否则内容会被压扁或被多留一条空白）。new == self.height()，所以这就是 _fit_height 量到的值。
+        self.frame.setFixedHeight(max(1, self.height() - 20))
         self._anim_h = None
         self._resizing = False
         if getattr(self, "_resize_again", False):
