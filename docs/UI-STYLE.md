@@ -76,8 +76,8 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 输入框/下拉框聚焦 | 150ms | `SmoothLineEdit` / `SmoothComboBox`：焦点蓝环是自绘叠层淡入，QSS 里**故意没有** `:focus` 规则（会打架） |
 | 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口宽度固定**（2026-10-03 起 = 记词板 300 + 面板宽 + 缝 6 + 细边 26，默认 652），只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
 | 记词板开 / 关 | 240ms，OutBack / InCubic | 记词板挂在面板**左侧同一窗口**里，从窗口左缘外 `x=-WB_W` 滑进来（OutBack 的过冲回弹就是"活板门"的手感）。**不 resize 窗口**，理由同上 |
-| 卡片改宽度 | 拖动中实时跟手（不跑动画） | 拖左/右缘 ≤6px 触发：只改 `setFixedWidth` + 重排（`_fit_height`），**没有过渡动画**——动画会让被拖的边滞后于光标 |
-| 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；stagger **必须等 pos 动画 done 再启动** |
+| 卡片改宽度 | 拖动中实时跟手（不跑动画） | 抓左右**两条 12px 透明子控件**（`Card.grip_l/grip_r`，压在可见描边上、`GRIP_W=12`）触发：只改 `setFixedWidth` + 重排（`_fit_height`），**没有过渡动画**——动画会让被拖的边滞后于光标。**别改回按 x 坐标判边**：卡片最外 8px 是投影留白，描边在 x=8，按坐标判（x≤6）用户按描边时事件落在 `frame` 上、进不了 `Card.mousePressEvent`，会变成"拖不动/在挪窗口" |
+| 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；**`_stagger_prepare()` 必须在 `show()` 之前把内容静态钉 0**，stagger **必须等 pos 动画 done 再启动**。少了 prepare 就是"卡片带全部文字滑进来（已经能读）→ 滑完一起变 0 → 再淡回来"，用户的原话是"弹出的动画头尾反了"（实测 t≈0-200ms 全 vis、t≈240ms 一起 0.00） |
 | 卡片关闭 | 150ms，InCubic | 向下 16px 滑出再 hide；**不走 windowOpacity 淡出**（同上，结尾会闪黑） |
 | 卡片长高 | 240ms，OutCubic | `_resize_keep_place`：`SetNoConstraint` 布局 + 只量不设 + 钉 frame 高 + 动画期间钉窗口最大高度 + resizeEvent 自愈（缺一不可，见坑清单） |
 | 内容揭示（详解/聊天） | 长高 240ms → 淡入 150ms | `_graceful_reveal`：长高期间把内容 opacity **静态钉 0**，长高结束才淡入。**绝不在窗口长高期间跑 opacity 动画**（残影 bug 的根源），静态 0 不发动画、不触发 |
@@ -173,9 +173,9 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 留白 | 组内 4/8、组间 12~16；分隔线上下各让 4px | `test_a4_spacing_on_scale` 全刻度 | 组间距 > 组内间距已成立；再大会让浮层失去紧凑感 |
 | 视觉层级 | 释义左侧 2px 渐隐竖线（`#cnbar`）；原句 12px `mute`（曾违规用 ash 承载正文，对比度只有 3.64） | `test_a5_ash_only_for_disabled`（按色值扫描） | 四段字号阶梯有断言；竖线+分组+语义色已够 |
 | 色彩 | 备注行语义色圆点：绿=省了 token、蓝=联网来源、红=错误；来源与对照去重 | 渲染图；`test_a4_no_color_outside_tokens` | 语义色只在承载信息时用；危险色不给退出按钮（低频操作不值得夸大） |
-| 动效 | 卡片元素 stagger 进场（45ms 间隔）；**必须等 pos 动画 done 再启动**——QGraphicsOpacityEffect 在窗口移动期间重绘不跟随，真机上把释义画到词头上（实测坑） | `test_b5_*` | 进/出/编排全齐；再叠就是炫技 |
+| 动效 | 卡片元素 stagger 进场（45ms 间隔，顺序 = 布局上下顺序：词头→释义→对照→英文→备注）；**`_stagger_prepare()` 在 `show()` 前把内容钉 0**，且**必须等 pos 动画 done 再启动**——QGraphicsOpacityEffect 在窗口移动期间重绘不跟随，真机上把释义画到词头上（实测坑） | `test_b5_*` | 进/出/编排全齐；再叠就是炫技 |
 | 微交互 | 按下时内容下压 1px（padding 7/5 对调，总高不变）；复制"✓ 已复制"式反馈早已有 | QSS pressed 规则 + `test_a6_button_states_defined` | 四态 + 反馈 + 光边生长已闭环 |
-| 响应式 | 卡片宽 clamp 到 屏宽×45%（下限 360）；设置窗滚动 + 90% 屏高 | `test_a2_card_shows_without_crash`、`test_a3_settings_scrollable` | Qt 逻辑像素天然 DPI 无关；Dock 按屏钉死 |
+| 响应式 | 卡片宽 clamp 到 屏宽×45%（下限 360）；设置窗滚动 + 最多 80% 屏高 | `test_a2_card_shows_without_crash`、`test_a3_settings_scrollable` | Qt 逻辑像素天然 DPI 无关；Dock 按屏钉死 |
 | 原创性 | 卡片从细边方向滑出（空间叙事：卡片是从面板里"抽"出来的）；"省 token"用绿点可视化——把成本做成信息 | `test_b1_*`、`test_b2_*` | 光边/字标/monogram/滑出方向已构成完整识别系统 |
 
 ### 本轮新踩的坑

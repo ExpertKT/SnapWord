@@ -607,6 +607,9 @@ QSS = Template("""
 /* 主面板左边缘的抓条：平时全透明，鼠标移上去才亮一条蓝（"这里能拖"） */
 #dockgrip { background: transparent; }
 #dockgrip:hover { background: $blue_soft; }
+/* 卡片左右两条抓边：透明、只靠光标提示（这条压在最外 8px 的投影留白上，
+   亮一块蓝会从圆角外面支出去，所以不给 hover 底色） */
+#cardgrip { background: transparent; }
 QLabel { color: $body; }
 #word { color: $ink; font-size: 24px; font-weight: 600; }
 #phon { color: $mute; font-size: 13px; }
@@ -928,6 +931,8 @@ class Card(QtWidgets.QWidget):
     save_requested = QtCore.Signal(object)             # 存词 / 取消存词（由 App 落库）
     width_changed = QtCore.Signal(int)                 # 用户拖右边改了宽度（由 App 记进配置）
 
+    GRIP_W = 12          # 左右抓边宽度（见 __init__：要盖住 x=8 那条可见描边）
+
     def __init__(self, font_pt=10, width=0):
         super().__init__(None)
         self.setWindowFlags(
@@ -958,6 +963,30 @@ class Card(QtWidgets.QWidget):
         self._build()
         self.setFont(QtGui.QFont("Microsoft YaHei UI", font_pt))
         self._typography()      # 必须在 setFont 之后：setFont 会把字距一起冲掉
+        # 左右两条抓边 —— 为什么是子控件、而不是在 mousePressEvent 里按 x 判边：
+        # 卡片最外 8px 是投影预留的**透明**留白，用户看见的描边在 x=8 / x=width-8。
+        # 按坐标判边时（原来 x<=6 / x>=width-6）只在最外面那 6px 生效，用户瞄着描边按下去，
+        # 事件落在 frame 子控件上、根本进不了 Card.mousePressEvent，于是变成了"移动卡片"
+        # —— 用户的原话就是"拖大小没实现"（实测：430 宽的卡，判边区 [424,430]，描边在 422）。
+        # 做成压在描边上的子控件后：Qt 悬停自己换 SizeHorCursor（不用开 mouseTracking，
+        # 这也正是原来没任何提示的原因），按下后的隐式抓取又保证 move/release 都送给同一条边。
+        self.grip_l = QtWidgets.QFrame(self, objectName="cardgrip")
+        self.grip_r = QtWidgets.QFrame(self, objectName="cardgrip")
+        for g in (self.grip_l, self.grip_r):
+            g.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            g.setToolTip("拖动改卡片宽度")
+            g.installEventFilter(self)
+        self._place_grips()
+
+    def _place_grips(self):
+        """把两条抓边摆到可见描边上（卡片高度跟着内容走，所以每次 resize 都要重摆）。"""
+        if not getattr(self, "grip_l", None):
+            return
+        h = self.height()
+        self.grip_l.setGeometry(0, 0, self.GRIP_W, h)
+        self.grip_r.setGeometry(max(0, self.width() - self.GRIP_W), 0, self.GRIP_W, h)
+        self.grip_l.raise_()
+        self.grip_r.raise_()
 
     def _word_cap(self):
         """词头那一行给词留的最大宽度：卡宽 - 170（430 宽时正好是原来的 260）。"""
@@ -1224,6 +1253,7 @@ class Card(QtWidgets.QWidget):
         # （QTBUG-28531）。用户报的"弹出没有过渡、闪动、虚影"就是这条路。位置动画和
         # 控件级 QGraphicsOpacityEffect 都不踩它。
         self.setWindowOpacity(1.0)       # 防御：上次可能淡出一半就被打断
+        self._stagger_prepare()          # 先钉成全透明，再 show（顺序说明见那个方法）
         self.show()
         self.raise_()
         p = self.pos()
@@ -1235,11 +1265,15 @@ class Card(QtWidgets.QWidget):
         _anim(self, b"pos", QtCore.QPoint(p.x() + 24, p.y() + 10), p, DUR["base"],
               done=lambda *_: self._stagger_in())
 
-    def _stagger_in(self):
-        """元素依次进场（stagger）：词头 → 释义 → 补充信息，间隔 45ms。
+    def _stagger_prepare(self):
+        """把要依次进场的文字先钉成全透明。**必须在 `show()` 之前调**。
 
-        只动 opacity（QGraphicsOpacityEffect），**不动位置**：布局管着的控件一动位置就会被
-        下一次 layout 冲掉，文档里也明令别动布局属性。
+        不然用户看到的是：卡片带着全部文字滑进来（这一瞬间已经能读了），滑完这些文字
+        一起"啪"地掉到透明、再一段段淡回来 —— 也就是"弹出的头（出现）和尾（淡入）反了"。
+        实测（tmp\edge_probe.py，430 的卡）：
+          t≈0-200ms 滑入，word/cn/en 都是 vis（内容全在）
+          t≈240ms 滑完，三个一起变 0.00（整张卡一瞬空白）
+          t≈280-500ms 才按 词头→释义→英文 依次淡回来
         """
         # 复用同一张卡片时清掉上一轮的效果。**必须走 `_clear_stagger()`，不能裸
         # `setGraphicsEffect(None)`**：opacity 动画是挂在 effect 上的（父对象 = effect），
@@ -1247,15 +1281,28 @@ class Card(QtWidgets.QWidget):
         # 下一次遍历 `_ANIMS` 就是 RuntimeError（实测：上一个词查完 700ms 内再查下一个词
         # 必崩）。`_clear_stagger()` 会先 stop 并从 `_ANIMS` 摘除，再摘 effect。
         self._clear_stagger()
-        targets = [self.lb_word, self.lb_cn, self.lb_en, self.lb_alt, self.lb_note]
+        # 顺序必须跟**布局里的上下顺序**一致（alt 在 en 上面），否则是"下面那行先出现、
+        # 上面那行后出现"的倒序感。
+        targets = [self.lb_word, self.lb_cn, self.lb_alt, self.lb_en, self.lb_note]
         targets = [w for w in targets if w.isVisibleTo(self) and w.text()]
         self._staggered = list(targets)
         self._stagger_eff = []
-        for i, w in enumerate(targets):
+        for w in targets:
             eff = QtWidgets.QGraphicsOpacityEffect(w)
             w.setGraphicsEffect(eff)
             eff.setOpacity(0.0)
             self._stagger_eff.append(eff)
+
+    def _stagger_in(self):
+        """位移动画跑完之后才开始依次淡入（间隔 45ms）。见 `_stagger_prepare` 的顺序说明。
+
+        只动 opacity（QGraphicsOpacityEffect），**不动位置**：布局管着的控件一动位置就会被
+        下一次 layout 冲掉，文档里也明令别动布局属性。
+        """
+        for i, w in enumerate(self._staggered):
+            eff = w.graphicsEffect()
+            if eff is None:              # 已经被 _clear_stagger() 掐掉了
+                continue
 
             def play(w=w, eff=eff):
                 # 动画一完就把 effect 摘掉：QGraphicsOpacityEffect 在窗口**几何变化**
@@ -1718,6 +1765,8 @@ class Card(QtWidgets.QWidget):
         a.valueChanged.connect(_guard)
 
     def resizeEvent(self, e):
+        # 抓边跟着窗口高走（长内容、改宽度都会走这里）
+        self._place_grips()
         # 延后布局激活偶尔会把窗口**一次性顶到终点**（实测那一下 48px：先冲高、下一帧再缩回
         # 继续长），一帧的闪动在真机上看得见。这里在同一个事件里立刻拉回动画当前值，
         # 把它压成看不见的一次 setGeometry。
@@ -1744,26 +1793,42 @@ class Card(QtWidgets.QWidget):
     #
     # 宽度那一档的判定：卡片最外面 8px 是 outer 的边距（frame 在里面），鼠标落在那里时
     # 落点是 Card 自己、不是 frame 里的子控件，所以 press 能收到 —— 离左右边 ≤6px 就算抓边。
-    def _edge_at(self, x):
-        if x <= 6:
-            return "left"
-        if x >= self.width() - 6:
-            return "right"
-        return ""
+    def _begin_edge(self, edge, gpos):
+        """开始拖宽度。事件来自哪条抓边由调用方判定（见 __init__ 里为什么要做成子控件）。"""
+        if edge == "right":
+            self._drag_w = (self.width(), gpos.x())
+        else:
+            # 左边拖动：窗口的右上角钉住不动（宽度变了多少，x 就往回退多少）
+            self._drag_w = ("left", self.width(), gpos.x(), self.x() + self.width())
+        self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+
+    def _end_edge(self):
+        self._drag_w = None
+        self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        self.width_changed.emit(int(self.width()))
+
+    def eventFilter(self, obj, ev):
+        # 两条抓边上的鼠标事件全由这里接管：抓边走的是子控件，Card.mousePressEvent 收不到。
+        if obj is self.grip_l or obj is self.grip_r:
+            edge = "left" if obj is self.grip_l else "right"
+            t = ev.type()
+            if t == QtCore.QEvent.Type.MouseButtonPress:
+                if ev.button() == QtCore.Qt.MouseButton.LeftButton:
+                    self._begin_edge(edge, ev.globalPosition().toPoint())
+                    return True
+            elif t == QtCore.QEvent.Type.MouseMove:
+                if self._drag_w is not None:
+                    self._drag_width(ev)
+                    return True
+            elif t == QtCore.QEvent.Type.MouseButtonRelease:
+                if self._drag_w is not None:
+                    self._end_edge()
+                    return True
+        return super().eventFilter(obj, ev)
 
     def mousePressEvent(self, e):
+        # 左右两边都由抓边接管了，这里只剩"拖卡片本体挪位置"（顶/底那两条留白）。
         if e.button() != QtCore.Qt.MouseButton.LeftButton:
-            return
-        edge = self._edge_at(int(e.position().x()))
-        if edge == "right":
-            self._drag_w = (self.width(), e.globalPosition().toPoint().x())
-            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-            return
-        if edge == "left":
-            # 左边拖动：窗口的右上角钉住不动（宽度变了多少，x 就往回退多少）
-            self._drag_w = ("left", self.width(), e.globalPosition().toPoint().x(),
-                            self.x() + self.width())
-            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
             return
         self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
@@ -1773,10 +1838,6 @@ class Card(QtWidgets.QWidget):
             return
         if self._drag is not None:
             self.move(e.globalPosition().toPoint() - self._drag)
-            return
-        # 悬停在边上给个"能拖"的光标
-        self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor if self._edge_at(int(e.position().x()))
-                       else QtCore.Qt.CursorShape.ArrowCursor)
 
     def _drag_width(self, e):
         gx = e.globalPosition().toPoint().x()
@@ -1809,9 +1870,7 @@ class Card(QtWidgets.QWidget):
     def mouseReleaseEvent(self, _):
         self._drag = None
         if self._drag_w is not None:
-            self._drag_w = None
-            self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
-            self.width_changed.emit(int(self.width()))
+            self._end_edge()
 
     def wheelEvent(self, e):
         """卡片空白处的滚轮转给"正在显示的那块长内容"。
