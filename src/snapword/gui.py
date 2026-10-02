@@ -2197,6 +2197,53 @@ class Rail(QtWidgets.QFrame):
             p.drawRoundedRect(QtCore.QRectF(0, (h - self._bar) / 2.0, 2, self._bar), 1, 1)
 
 
+class _WordbookFold(QtWidgets.QWidget):
+    """Paint a hinged, phone-like fold while the real panel stays interactive offscreen."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._pix = QtGui.QPixmap()
+        self._progress = 0.0
+
+    def start(self, pix, progress):
+        self._pix = pix
+        self._progress = max(0.0, min(1.0, float(progress)))
+        self.setGeometry(0, 0, self.parentWidget().WB_W, self.parentWidget().PANEL_H)
+        self.show()
+        self.update()
+
+    def set_progress(self, progress):
+        self._progress = max(0.0, min(1.0, float(progress)))
+        self.update()
+
+    def paintEvent(self, _event):
+        if self._pix.isNull() or self._progress <= 0.0:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        # A fan of narrow planes makes the hinge stay fixed while the outer edge
+        # folds out, instead of exposing a flat rectangular strip like a scroll.
+        slices = 18
+        for i in range(slices):
+            u0, u1 = i / slices, (i + 1) / slices
+            src = QtCore.QRectF(u0 * w, 0, (u1 - u0) * w, h)
+            # Project each source strip onto the plane rotating around its right edge.
+            # The outer edge advances faster; the stable hinge remains at x=w.
+            x0 = w - (1.0 - u0) * w * self._progress
+            x1 = w - (1.0 - u1) * w * self._progress
+            dst = QtCore.QRectF(x0, 0, max(0.5, x1 - x0), h)
+            p.drawPixmap(dst, self._pix, src)
+            shade = int((1.0 - self._progress) * (75 + 15 * (1.0 - u0)))
+            p.fillRect(dst, QtGui.QColor(0, 0, 0, shade))
+        # The hinge catches a narrow highlight/shadow, like a folding display seam.
+        seam = max(1, int(2 * self._progress))
+        p.fillRect(QtCore.QRectF(w - seam, 0, seam, h), QtGui.QColor(255, 255, 255, 28))
+        p.end()
+
+
 class Dock(QtWidgets.QWidget):
     """常驻屏幕右边缘的小面板：收起时只是一条细边，点一下展开。
 
@@ -2378,6 +2425,9 @@ class Dock(QtWidgets.QWidget):
         # 抽屉永远停在窗口最左边 x=0；关着的时候靠 mask（_apply_mask）把它整条裁掉，
         # 所以关→开是"掀开"（可见宽度 0→WB_W），不是整块滑进来。
         self.wbpanel.move(0, 0)
+        self._wb_fold = _WordbookFold(self)
+        self._wb_fold.setGeometry(0, 0, self.WB_W, self.PANEL_H)
+        self._wb_fold.hide()
         self.wbpanel.setVisible(self.wb_open)
         # 记词板是"从面板背后抽出来的抽屉"：关着的时候它就停在面板正后方（同一个 x），
         # 所以面板必须压在它上面 —— 这条 raise_ 是那扇门的"门框"。
@@ -2399,19 +2449,25 @@ class Dock(QtWidgets.QWidget):
         越晚——内容本身一动不动，被"门缝"逐格照亮。这就是掀盖/翻门的手感。
         曲线 OutCubic（开）/ InCubic（关）：门是"荡开、收住"，不用过冲回弹。
         """
+        previous = getattr(self, "_wb_anim", None)
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+            self._wb_anim = None
         self.wb_open = not self.wb_open
         self.refresh_wordbook()
         self.wbpanel.move(0, 0)
+        self.wbpanel.show()
+        self.wbpanel.clearMask()
+        self.panel.raise_()
+        self.rail.raise_()
+        self.grip.raise_()
         if self.wb_open:
-            self.wbpanel.setVisible(True)
-            # setVisible(True) 会把抽屉顶到最上层，而它必须**在面板下面**（不然掀开时是
-            # 盖着面板翻，而不是从面板背后翻开）。所以每次露头都重新压回面板之下。
-            self.panel.raise_()
-            self.rail.raise_()
-            self.grip.raise_()
-            # 窗口 mask 现在就切到"开着"的稳态（抽屉那块别再吃鼠标）；关的时候不急，
-            # 等 _settle() 收尾 —— 关门动画期间那块还得挡住鼠标。
             self._apply_mask()
+        pix = self.wbpanel.grab()
+        self.wbpanel.hide()
+        self._wb_fold.start(pix, self._wb_reveal / float(self.WB_W))
+        self._wb_fold.raise_()
         _stop_anims(self.wbpanel, b"pos")       # 旧版留下过的位移动画：别让两层动画打架
         a = QtCore.QVariantAnimation(self)
         a.setStartValue(float(self._wb_reveal))
@@ -2428,6 +2484,8 @@ class Dock(QtWidgets.QWidget):
     def _set_wb_reveal(self, v):
         self._wb_reveal = v
         self._clip_wordbook()
+        if hasattr(self, "_wb_fold"):
+            self._wb_fold.set_progress(float(v) / float(self.WB_W))
 
     def _clip_wordbook(self):
         """把抽屉裁到"已掀开的那条"（`[WB_W-r, WB_W)`）。
@@ -2680,6 +2738,8 @@ class Dock(QtWidgets.QWidget):
         self.panel.move(x0 if self.expanded else x0 + self._pan_w + self.RAIL_W, 0)
         self.wbpanel.move(0, 0)                 # 抽屉位置恒定，露多少由 mask 决定
         self.wbpanel.setVisible(self.wb_open)
+        if hasattr(self, "_wb_fold"):
+            self._wb_fold.hide()
         self._wb_reveal = float(self.WB_W if self.wb_open else 0)
         self._clip_wordbook()
         self._apply_mask()

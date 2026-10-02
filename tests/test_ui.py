@@ -1116,11 +1116,13 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     assert not d.mask().contains(far), "关着的时候窗口 mask 还留着记词板那块（会吃鼠标）"
 
     d.toggle_wordbook()
-    xs, reveals, near_first, far_first, win_masks = [], [], None, None, []
+    assert d._wb_fold.isVisible(), "掀门动画期间应显示折叠预览层"
+    xs, reveals, fold_progress, near_first, far_first, win_masks = [], [], [], None, None, []
     end = time.monotonic() + 0.42
     while time.monotonic() < end:
         xs.append(d.wbpanel.pos().x())
         reveals.append(d._wb_reveal)
+        fold_progress.append(d._wb_fold._progress)
         win_masks.append(d.mask().contains(near) and d.mask().contains(far))
         n, f = lit(near), lit(far)
         if n and near_first is None:
@@ -1132,11 +1134,13 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     wait(300)
     assert all(x == 0 for x in xs), "抽屉位置在动画里动了（=整块平移）：%s" % xs[:8]
     assert max(reveals) > min(reveals), "露出宽度没变，那根本没动画：%s" % reveals[:6]
+    assert max(fold_progress) > min(fold_progress), "折叠预览没有随动画展开"
     assert near_first is not None and far_first is not None and near_first <= far_first, \
         "铰链侧没有比远端先亮（掀盖方向不对）：铰链 %s / 远端 %s" % (near_first, far_first)
     assert all(win_masks), "窗口 mask 动画期间就在变（该只在开/关两个稳态各设一次）"
     assert abs(d._wb_reveal - d.WB_W) < 1 and d.wbpanel.isVisible(), \
         "掀开后没露满：reveal=%s" % d._wb_reveal
+    assert not d._wb_fold.isVisible(), "稳态应恢复真实记词板，不保留预览层"
     assert lit(near) and lit(far) and d.wbpanel.mask().isEmpty(), \
         "掀开后该整块可见（子控件不该还留着 mask）"
 
