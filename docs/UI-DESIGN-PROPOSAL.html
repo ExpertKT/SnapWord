@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SnapWord 界面设计方案 v2 · 2026-09-28</title>
+<style>
+:root{
+  --canvas:#07080a; --surface:#0d0d0d; --elevated:#101111; --card:#121212;
+  --hairline:#242728; --hairline-strong:#33373d;
+  --ink:#f4f4f6; --body:#cdcdcd; --mute:#9c9c9d; --ash:#6a6b6c;
+  --blue:#57c1ff; --blue-hover:#7bd0ff; --blue-pressed:#3aa9ea;
+  --blue-soft:rgba(87,193,255,0.15);
+  --green:#59d499; --yellow:#ffc533; --red:#ff6161;
+  --r4:4px; --r6:6px; --r8:8px; --r10:10px; --r16:16px; --r9999:9999px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--body);
+  font:15px/1.6 "Microsoft YaHei UI","Segoe UI",sans-serif;}
+.wrap{max-width:1080px;margin:0 auto;padding:32px 24px 80px}
+h1{color:var(--ink);font-size:28px;font-weight:600;margin:0 0 6px;letter-spacing:.2px}
+h2{color:var(--ink);font-size:20px;font-weight:600;margin:44px 0 12px;
+  padding-top:20px;border-top:1px solid var(--hairline)}
+h3{color:var(--ink);font-size:15px;font-weight:600;margin:22px 0 8px}
+p{margin:0 0 10px}
+.meta{color:var(--mute);font-size:13px;margin-bottom:24px}
+code{background:var(--elevated);border:1px solid var(--hairline);border-radius:var(--r4);
+  padding:1px 6px;font-size:12.5px;color:var(--ink)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+th,td{border:1px solid var(--hairline);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--surface);color:var(--ink);font-weight:600}
+td.num{white-space:nowrap;color:var(--ink)}
+.note{color:var(--mute);font-size:13px}
+.warn{color:var(--yellow)} .ok{color:var(--green)} .bad{color:var(--red)}
+ul{margin:6px 0 10px 20px;padding:0} li{margin:3px 0}
+.toc a{color:var(--blue);text-decoration:none} .toc a:hover{color:var(--blue-hover)}
+.toc li{margin:2px 0}
+
+/* ---- mockup 框架 ---- */
+.stage{background:linear-gradient(180deg,#0a0b0d,#07080a);border:1px solid var(--hairline);
+  border-radius:var(--r16);padding:24px;margin:16px 0}
+.stage>.cap{color:var(--mute);font-size:12px;margin-bottom:14px}
+.row{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}
+
+.card{width:430px;background:var(--surface);border:1px solid var(--hairline);
+  border-radius:var(--r10);padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.47)}
+.word{color:var(--ink);font-size:24px;font-weight:600;letter-spacing:.2px}
+.phon{color:var(--mute);font-size:13px;margin-left:6px}
+.badge{float:right;color:var(--blue);font-size:11px;background:var(--blue-soft);
+  border:1px solid var(--hairline);border-radius:var(--r4);padding:1px 6px;margin-top:8px}
+.cn{color:var(--ink);font-size:15px;line-height:1.6;margin-top:8px}
+.en{color:var(--body);font-size:13px;margin-top:4px}
+.altline{color:var(--mute);font-size:12px;margin-top:6px}
+.noteline{color:var(--mute);font-size:11px;margin-top:8px}
+hr.hr{border:none;border-top:1px solid var(--hairline);margin:12px 0}
+.chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:10px}
+.chip{background:var(--elevated);border:1px solid var(--hairline);border-radius:var(--r9999);
+  color:var(--mute);font-size:11px;padding:2px 8px;line-height:1.5}
+.chip.hot{background:var(--card);border-color:var(--hairline-strong);color:var(--ink)}
+button.chip{font-family:inherit;cursor:pointer;line-height:1.5}
+.btns{display:flex;gap:4px;align-items:center}
+.btn{background:var(--elevated);border:1px solid var(--hairline);border-radius:var(--r8);
+  color:var(--body);font-size:12.5px;height:32px;padding:0 12px;display:inline-flex;align-items:center;
+  font-family:inherit;cursor:pointer}
+.btn.go{background:var(--blue);border-color:var(--blue);color:var(--canvas);font-weight:600}
+.btn.go:hover{background:var(--blue-hover);border-color:var(--blue-hover)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--mute)}
+.btn.ghost:hover{background:var(--card);color:var(--ink)}
+.btn:hover{background:var(--card);color:var(--ink);border-color:var(--hairline-strong)}
+.btn:focus-visible{outline:none;border-color:var(--blue)}
+.btn:disabled{background:var(--surface);color:var(--ash);border-color:var(--hairline)}
+.chip:focus-visible{outline:none;border-color:var(--blue)}
+.inp:focus{outline:none;border-color:var(--blue)}
+.spacer{flex:1}
+
+.dockwrap{display:flex;align-items:stretch}
+.panel{width:320px;height:300px;background:var(--surface);border:1px solid var(--hairline);
+  border-right:none;border-radius:var(--r10) 0 0 var(--r10);padding:14px;display:flex;flex-direction:column;gap:12px}
+.phead{display:flex;align-items:center;gap:8px}
+.pword{color:var(--ink);font-size:17px;font-weight:700;letter-spacing:.2px}
+.pchip{background:var(--elevated);border:1px solid var(--hairline);border-radius:var(--r9999);
+  color:var(--mute);font-size:11px;padding:2px 8px}
+.inp{background:var(--elevated);border:1px solid var(--hairline);border-radius:var(--r8);
+  color:var(--ink);height:32px;padding:0 10px;font-size:13px;display:flex;align-items:center}
+.inp.focus{border-color:var(--hairline-strong)}
+.hint{color:var(--mute);font-size:11px;line-height:1.5}
+.rail{width:26px;background:var(--surface);border:1px solid var(--hairline);border-right:none;
+  border-radius:var(--r10) 0 0 var(--r10);display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;margin-left:6px}
+.rail .logo{color:var(--blue);font-size:16px;font-weight:800}
+.rail .arrow{color:var(--blue);font-size:13px}
+.rail .txt{color:var(--ash);font-size:10px;letter-spacing:1px;writing-mode:vertical-rl}
+
+.dlg{width:460px;background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--r10);padding:16px}
+.dlg h4{margin:0 0 12px;color:var(--ink);font-size:15px;font-weight:600}
+.form{display:grid;grid-template-columns:150px 1fr;gap:12px 12px;align-items:center}
+.form label{color:var(--body);font-size:13px}
+.form .field{height:32px}
+.chkbox{display:flex;gap:8px;align-items:flex-start;color:var(--body);font-size:12px}
+.ind{width:14px;height:14px;border:1px solid var(--hairline-strong);border-radius:var(--r4);
+  background:var(--elevated);flex:none;margin-top:3px}
+.ind.on{background:var(--blue);border-color:var(--blue)}
+.dlgfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+
+.sw{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.sw > div{width:120px;text-align:center}
+.sw i{display:block;height:40px;border:1px solid var(--hairline);border-radius:var(--r6);margin-bottom:4px}
+.sw span{color:var(--mute);font-size:11px;display:block}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--hairline);color:var(--ash);font-size:12px}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>SnapWord 界面设计方案 v2</h1>
+<div class="meta">
+日期 2026-09-28 · 依据 <code>docs/UI-STYLE.md</code>（唯一审美裁判）+ Raycast 设计系统（本地副本 <code>tmp/raycast.md</code>，669 行） ·
+所有尺寸与配色数值均为 headless 实测，非估算 · 三轮累计 19 处改动已同步落地到 <code>src/snapword/gui.py</code>
+</div>
+
+<div class="toc">
+<strong style="color:var(--ink)">目录</strong>
+<ul>
+<li><a href="#s0">0 · 这一版的三条决定</a></li>
+<li><a href="#s1">1 · 依据：用户习惯从哪来的</a></li>
+<li><a href="#s2">2 · 三个界面的设计（含 mockup）</a></li>
+<li><a href="#s3">3 · 组件规范（实测数值表）</a></li>
+<li><a href="#s4">4 · 排版与间距</a></li>
+<li><a href="#s5">5 · 动效：什么能动、什么不能动</a></li>
+<li><a href="#s6">6 · 可访问性（实算对比度）</a></li>
+<li><a href="#s7">7 · 已落地清单与实测证据</a></li>
+<li><a href="#s8">8 · 下一步路线图</a></li>
+<li><a href="#s9">9 · 七条批评的整改对照</a></li>
+</ul>
+</div>
+
+<h2 id="s0">0 · 这一版的三条决定</h2>
+<ol>
+<li><strong>层次靠描边，不靠底色差。</strong>实测 <code>elevated #101111</code> 对 <code>surface #0d0d0d</code> 的对比度只有
+<span class="warn">1.03:1</span>，肉眼几乎分不出来。所以面板/输入框/菜单的边界必须靠 <code>hairline</code> 描边来切，
+色阶只用来表达"谁在上面"（悬停→<code>card</code>，选中→<code>card</code>+强描边）。</li>
+<li><strong>控件站到同一条 32px 线上。</strong>参考系统给的是 36px 高 + 8/16 padding（那是它自己的
+<code>button-md</code>）；SnapWord 是浮层小工具，32px 更贴它的体量。这一版把下拉框补到 32px，
+现在卡片和面板里所有控件实测同为 32px。</li>
+<li><strong>所有颜色、圆角、时长都只能从令牌表取。</strong>本轮把 QSS 里写死的 6 处颜色收进了令牌表
+（见 §3），并在文档里留了"QSS 不能写 <code>#</code> 注释"的坑——那条坑能把后面所有规则一次性吃掉。</li>
+<li><strong>（第三轮新增）识别符号＝一道光边。</strong>"没特色"的解法不是加装饰，而是把一个符号重复出现在三个表面上：
+细边悬停时亮起的 2px 竖直蓝条（带 180ms 生长动画）、面板头下 1px 的水平渐隐蓝线（<code>#streak</code>）、
+卡片顶沿那道 <code>hairline-strong</code> 受光边。渐变色标只准用令牌，透明不算颜色。</li>
+<li><strong>（第三轮新增）两个 Qt 的坑当场改写了规范：</strong>圆角超过控件半高不会钳成半圆而是<strong>静默变直角</strong>
+（整圆胶囊改为按半高取值：<code>#chip</code> 8px / <code>#pill</code> 12px）；
+QSS 不支持 <code>#a, #b {}</code> 逗号分组选择器（共用样式只能各写各的）。都写进了 <code>docs/UI-STYLE.md</code>。</li>
+</ol>
+
+<h2 id="s1">1 · 依据：用户习惯从哪来的</h2>
+<table>
+<tr><th style="width:34%">来源</th><th>取到的规则</th><th style="width:28%">落到 SnapWord 哪</th></tr>
+<tr><td>VoltAgent/awesome-design-md · raycast/DESIGN.md<br><span class="note">本地 <code>tmp/raycast.md</code>，669 行</span></td>
+<td><code>button-primary</code>：高 36、padding 8px 16px、圆角 md(8)、<code>primary-pressed</code> 有独立色；<code>text-input</code> 高 36、padding 8px 12px</td>
+<td>取"有独立 pressed 色"这条 → 新增 <code>blue-pressed</code>；尺寸取 32（浮层体量）</td></tr>
+<tr><td>同上</td><td><code>command-palette-row</code>：padding 6px 10px、圆角 sm(6)，<strong>激活态</strong>才填 <code>surface-card</code></td>
+<td>菜单项 <code>QMenu::item</code>（padding 6px 18px / 圆角 6 / 选中填 <code>card</code>）</td></tr>
+<tr><td>同上</td><td><code>pill-tab</code> 圆角 full、<code>badge-pro</code> 圆角 xs + padding 2px 6px、<code>keycap</code> 高 20</td>
+<td><code>#chip</code> 走整圆胶囊（9999）、<code>#src</code> 徽章走细胶囊（4px）</td></tr>
+<tr><td>Windows 桌面习惯</td><td>托盘图标右键＝程序入口；<code>Esc</code> 关闭；<code>Enter</code> 发送；表单＝左标签右控件</td>
+<td>托盘菜单、卡片 Esc、聊天回车发送、设置用 <code>QFormLayout</code>——代码中已如此，方案继续保留</td></tr>
+<tr><td>本产品硬约束</td><td>浮在任意桌面内容之上 → 必须<b>单层投影</b>；查词要快 → 语义色只留给真需要的地方</td>
+<td><code>_shadow()</code>：blur 24 / <code>rgba(0,0,0,120)</code> / y 6，只给卡片，面板不加（贴屏幕边会被切）</td></tr>
+</table>
+
+<h2 id="s2">2 · 三个界面的设计</h2>
+
+<h3>2.1 悬浮卡片（430px 宽，唯一主界面）</h3>
+<div class="stage">
+<div class="cap">单词卡 · 信息层级：词头 → 释义 → 例证/对照 → 备注 → 操作</div>
+<div class="row">
+<div class="card">
+  <div><span class="word">serendipity</span><span class="phon">/ˌserənˈdɪpəti/</span>
+    <span class="badge">ecdict · gre</span></div>
+  <div class="cn">n. 意外发现珍奇事物的运气；机缘凑巧的能力</div>
+  <div class="en">the occurrence and development of events by chance in a happy way</div>
+  <div class="altline">有道：意外的好运；偶然发现</div>
+  <div class="noteline">变形：serendipities · 来自本地缓存（没再花 token）</div>
+  <hr class="hr">
+  <div class="btns">
+    <span class="btn go">详细解释</span><span class="btn">问 AI</span>
+    <span class="spacer"></span>
+    <span class="btn">复制</span><span class="btn">钉住</span><span class="btn ghost">✕</span>
+  </div>
+</div>
+
+<div class="card">
+  <div><span class="word" style="font-size:17px">整句/词组</span>
+    <span class="badge">youdao</span></div>
+  <div class="altline" style="margin-top:8px">the quick brown fox jumps over the lazy dog</div>
+  <div class="cn">敏捷的棕色狐狸跳过懒狗</div>
+  <div class="chips">
+    <span class="chip">the</span><span class="chip hot">quick</span><span class="chip">brown</span>
+    <span class="chip">fox</span><span class="chip">jumps</span><span class="chip">over</span>
+    <span class="chip">the</span><span class="chip">lazy</span><span class="chip">dog</span>
+  </div>
+  <div class="noteline" style="margin-top:10px">点胶囊＝换查这个词（9 个，实测单行不越界）</div>
+  <hr class="hr">
+  <div class="btns">
+    <span class="btn go">详细解释</span><span class="btn">问 AI</span>
+    <span class="spacer"></span>
+    <span class="btn">复制</span><span class="btn">钉住</span><span class="btn ghost">✕</span>
+  </div>
+</div>
+</div>
+</div>
+<ul>
+<li><strong>胶囊降一档</strong>：词胶囊原来吃的是普通按钮的壳（padding 6/12、12px 字），实测 <strong>32px</strong> 高，四个词就把短语卡撑成按钮展台；
+改走 <code>#chip</code> 后实测 <strong>24px</strong>，和版本徽章同一套语言。<span class="note">（改前/改后同一套断言脚本各跑一次，数值见 §7）</span></li>
+<li><strong>关闭按钮降权</strong>：<code>✕</code> 原来是实心次级按钮，和"复制/钉住"一个视觉量级，而它是最低频且不可逆的操作；改 ghost 后只剩淡灰字形，悬停才浮出来。</li>
+<li><strong>宽度 430 不动</strong>：它是卡片尺寸的锚，任何改动都会撞到 <code>_resize_keep_place()</code> 那套高度动画。</li>
+</ul>
+
+<h3>2.2 屏幕右缘：细边整体重绘（第三轮最大的一块）</h3>
+<div class="stage">
+<div class="cap">展开态：面板 320 + 间隙 6 + 细边 26 = 352，右侧永远贴死屏幕边缘（EDGE_GAP=0）；细边整条由 <code>class Rail</code> 自绘</div>
+<div class="dockwrap">
+  <div class="panel">
+    <div class="phead"><span class="pword">SnapWord</span><span class="pchip">v0.1.0beta</span>
+      <span class="spacer"></span><span class="btn ghost" style="height:26px">设置</span><span class="btn ghost" style="height:26px">退出</span></div>
+    <div style="height:1px;background:linear-gradient(90deg,var(--blue),rgba(0,0,0,0));margin-bottom:2px"></div>
+    <div class="inp">输入一个词，回车查询…</div>
+    <div class="btns"><span class="btn go">框选屏幕</span><span class="btn">查剪贴板</span></div>
+    <div class="spacer"></div>
+    <div class="hint">热键：ctrl+shift+D 框选屏幕，ctrl+alt+S 取划词。不想记热键就用上面的按钮。</div>
+  </div>
+  <div class="rail"><span class="logo">S</span><span class="arrow">›</span>
+    <span class="txt" style="writing-mode:vertical-rl;letter-spacing:.8px">SnapWord</span></div>
+</div>
+</div>
+<ul>
+<li><strong>原来的丑有明确病根</strong>：字标是 <code>"S\nn\na\np\nW\no\nr\nd"</code> 一个字母一行，
+行距把字距拉散，顶部再孤零零一个 16px 的字母——远看就是一列碎方块。</li>
+<li><strong>现在整条自绘</strong>（<code>QPainter</code>，<code>class Rail</code>）：顶部 18×18 monogram 方块
+（blue-soft 底 + blue 的 S，圆角 6）；中间把 "SnapWord" <strong>整词旋转 90°</strong> 成竖排（字距 0.8px 连续）；
+底部箭头随展开/收起翻向。不再有子控件，鼠标事件不会被子控件吃掉
+（原实现靠 <code>WA_TransparentForMouseEvents</code> 补救的问题随之消失）。</li>
+<li><strong>悬停光边</strong>：左内缘一道 2px × 40px 的蓝条，高度用动画从 0 长出来（180ms OutCubic 进、120ms InCubic 出）。
+动画走 <code>barH</code> 这个 Qt 属性（<code>QtCore.Property</code>），照旧经 <code>_anim()</code> 留引用，只动属性不动布局。</li>
+<li><strong>抽屉手感</strong>：展开动画缓动 OutCubic → <strong>OutQuint</strong>，尾段收得更狠，面板"抽出来"才到位；收起仍走 InCubic。</li>
+<li><strong>面板头下加了 <code>#streak</code></strong>：1px 水平蓝线从左往右渐隐——细边、面板、卡片共用同一道"光边"识别符号
+（卡片的版本是顶沿 <code>hairline-strong</code> 受光边 + <code>card → surface</code> 竖向渐变底）。</li>
+<li>面板和细边仍是<b>两块各自控件</b>、靠绝对坐标拼成一整条，不是 layout——layout 在窗口变窄时会把细边留在旧坐标跑到窗口外。
+左右角规则也不变：左侧两角 10px 圆、右侧两角方（贴屏幕边不能有圆角缺口），现在由绘制路径直接保证。</li>
+</ul>
+
+<h3>2.3 设置对话框</h3>
+<div class="stage">
+<div class="cap">左标签 / 右控件，行距 12，保存与取消在右下角</div>
+<div class="dlg">
+  <h4>SnapWord 设置 · v0.1.0beta</h4>
+  <div class="form">
+    <label>框选热键</label><div class="inp field">ctrl+shift+D</div>
+    <label>OCR 引擎</label><div class="inp field" style="justify-content:space-between">auto <span class="note">▾</span></div>
+    <label>DeepSeek 地址</label><div class="inp field">https://api.deepseek.com/v1/chat/completions</div>
+    <label>本地模型</label><div class="inp field">qwen3.5:9b</div>
+  </div>
+  <div style="margin-top:14px;display:grid;gap:10px">
+    <div class="chkbox"><span class="ind"></span><span>出结果后自动生成详细解释（会多花 token）</span></div>
+    <div class="chkbox"><span class="ind on"></span><span>挂一个常驻面板在屏幕右边缘（收起时只有一条细边，不用热键）</span></div>
+  </div>
+  <div class="dlgfoot"><span class="btn">取消</span><span class="btn go">保存</span></div>
+</div>
+</div>
+<ul>
+<li>进出场都有 120ms 淡入淡出；关闭走的是"先动画后 <code>done()</code>"，阻塞式 <code>exec()</code> 也能收干净（§7 有断言）。</li>
+</ul>
+
+<h2 id="s3">3 · 组件规范（实测数值表）</h2>
+<p class="note">数值来源：headless offscreen 下按真实 QSS 实例化控件后读 <code>height()</code>（字体 Microsoft YaHei UI 10pt，同卡片）。</p>
+<table>
+<tr><th>组件</th><th class="num">实测高</th><th>圆角</th><th>默认</th><th>悬停</th><th>按下/聚焦</th><th>禁用</th></tr>
+<tr><td>主按钮 <code>#go</code></td><td class="num">32</td><td>8</td>
+  <td>底 <code>blue</code>／字 <code>canvas</code></td><td><code>blue-hover</code></td><td><code>blue-pressed</code></td><td><code>ash</code></td></tr>
+<tr><td>次级按钮</td><td class="num">32</td><td>8</td>
+  <td>底 <code>elevated</code>／字 <code>body</code></td><td>底 <code>card</code>／描边 <code>hairline-strong</code></td><td>底 <code>canvas</code></td><td>字 <code>ash</code></td></tr>
+<tr><td>幽灵按钮 <code>#ghost</code></td><td class="num">32</td><td>8</td>
+  <td>透明底／字 <code>mute</code></td><td>底 <code>card</code>／字 <code>ink</code></td><td>—</td><td>—</td></tr>
+<tr><td>胶囊 <code>#chip</code>（版本徽章）/ <code>#pill</code>（词胶囊）</td><td class="num">24</td><td>8 / 12（整圆）</td>
+  <td>底 <code>elevated</code>／字 <code>mute</code>／11px</td><td>底 <code>card</code>+强描边／字 <code>ink</code></td><td>底 <code>canvas</code></td><td>—</td></tr>
+<tr><td>输入框 <code>QLineEdit</code></td><td class="num">32</td><td>8</td>
+  <td>底 <code>elevated</code>／13px</td><td>—</td><td>描边 <code>hairline-strong</code></td><td>—</td></tr>
+<tr><td>下拉框 <code>QComboBox</code></td><td class="num">32</td><td>8</td>
+  <td>同输入框（padding 本轮 6→7 对齐）</td><td>描边加强</td><td>—</td><td>—</td></tr>
+<tr><td>复选框</td><td class="num">指示块 14</td><td>4</td>
+  <td>框 <code>hairline-strong</code>／底 <code>elevated</code></td><td>—</td><td>勾选：底 <code>blue</code></td><td>—</td></tr>
+<tr><td>来源徽章 <code>#src</code></td><td class="num">细胶囊</td><td>4</td>
+  <td>字 <code>blue</code>／底 <code>blue-soft</code>／11px</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>菜单项 <code>QMenu::item</code></td><td class="num">6/18 padding</td><td>6</td>
+  <td>底 <code>elevated</code>／字 <code>body</code></td><td>选中：底 <code>card</code>／字 <code>ink</code></td><td>—</td><td>—</td></tr>
+</table>
+
+<p><strong>聚焦态统一规则：</strong>按钮 / 输入框 / 下拉框 / 复选框的 <code>:focus</code> 一律把描边换成 <code>blue</code>。
+原来只有输入框有聚焦态、且用的是 <code>hairline-strong</code>——它对底色只有 1.62:1，够不上 WCAG 对非文本元素 3:1 的要求。</p>
+
+<h3>本轮收进令牌表的颜色（原来写死在 QSS / 代码里）</h3>
+<table>
+<tr><th>令牌（新增）</th><th>值</th><th>原写法</th><th>理由</th></tr>
+<tr><td><code>blue-hover</code></td><td><code>#7bd0ff</code></td><td><code>QPushButton#go:hover</code> 里写死</td><td>守"QSS 里不出现表外色值"</td></tr>
+<tr><td><code>blue-pressed</code></td><td><code>#3aa9ea</code></td><td><code>QPushButton#go:pressed</code> 里写死</td><td>同上</td></tr>
+<tr><td><code>handle-hover</code></td><td><code>#4a5058</code></td><td>滚动条滑块悬停里写死</td><td>同上</td></tr>
+<tr><td colspan="4"><strong>代码侧一并回收：</strong>聊天人名三色 <code>#8ab4f8 / #e8e8ea / #9aa0a6</code> → <code>blue / ink / mute</code>；
+框选描边 <code>#8ab4f8</code> → <code>blue</code>；托盘圆点 <code>#2d5c8f</code> → <code>blue</code>、字形 <code>#ffffff</code> → <code>ink</code>。
+OCR demo 里那张白底黑字的合成图保留原样——它是喂给识别引擎的测试图，不是界面。</td></tr>
+</table>
+
+<h3>3.1 状态矩阵（可交互：鼠标悬停 / Tab 键聚焦）</h3>
+<p class="note">下面这些是真实可聚焦元素，用 Tab 走一遍就能看到焦点环的位置和颜色——这是纯静态图给不了的部分。</p>
+<div class="stage">
+<div class="row">
+  <div>
+    <div class="cap" style="color:var(--mute);font-size:12px;margin-bottom:8px">主按钮</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn go">详细解释</button>
+      <button class="btn">问 AI</button>
+      <button class="btn ghost">✕</button>
+      <button class="btn" disabled>不可点</button>
+    </div>
+  </div>
+  <div>
+    <div class="cap" style="color:var(--mute);font-size:12px;margin-bottom:8px">胶囊与表单</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="chip">serendipity</button>
+      <button class="chip hot">quick（悬停）</button>
+      <input class="inp" value="就这个词问点什么…" style="width:190px">
+    </div>
+  </div>
+</div>
+</div>
+<table>
+<tr><th>状态</th><th>主按钮</th><th>次级 / 幽灵</th><th>输入框 / 下拉框</th><th>胶囊</th></tr>
+<tr><td>默认</td><td>底 <code>blue</code> 字 <code>canvas</code></td><td>底 <code>elevated</code>（幽灵：透明）/ 字 <code>body</code>、<code>mute</code></td><td>底 <code>elevated</code> 描边 <code>hairline</code></td><td>底 <code>elevated</code> 字 <code>mute</code></td></tr>
+<tr><td>悬停</td><td><code>blue-hover</code></td><td>底 <code>card</code> + 强描边，幽灵字转 <code>ink</code></td><td>描边转 <code>hairline-strong</code></td><td>底 <code>card</code> + 强描边，字转 <code>ink</code></td></tr>
+<tr><td>按下</td><td><code>blue-pressed</code></td><td>底 <code>canvas</code></td><td>—</td><td>底 <code>canvas</code></td></tr>
+<tr><td>聚焦</td><td colspan="4"><strong>统一：描边转 <code>blue</code></strong>（9.70:1，超过 WCAG 非文本 3:1）</td></tr>
+<tr><td>禁用</td><td colspan="4">字 <code>ash</code>／底 <code>surface</code>／描边 <code>hairline</code>。<span class="warn">注意 <code>ash</code> 只有 3.64:1，只能用于禁用态，不得承载正文</span></td></tr>
+</table>
+
+<h2 id="s4">4 · 排版与间距</h2>
+<table>
+<tr><th>层级</th><th>字号/字重</th><th>颜色</th><th>用在哪</th></tr>
+<tr><td>词头</td><td>24 / 600</td><td><code>ink</code></td><td>卡片词头（17/700 用于面板标题）</td></tr>
+<tr><td>正文</td><td>15 / 400，行高 1.6</td><td><code>ink</code></td><td>词典释义</td></tr>
+<tr><td>元信息</td><td>13</td><td><code>mute</code></td><td>音标、English 释义</td></tr>
+<tr><td>备注 / 徽章</td><td>11</td><td><code>mute</code> / <code>blue</code></td><td>来源、变形、缓存提示</td></tr>
+<tr><td>按钮</td><td>12～13</td><td><code>body</code>，主按钮 <code>canvas</code></td><td>操作行</td></tr>
+</table>
+<p><strong>间距：</strong>基底 8，允许 2/4/8/12/16/24。卡片内边距 12~14，面板内边距 14，卡片内元素间距 8，
+按钮之间 4（同组紧凑），组与组之间 12~16。<br>
+<span class="ok">已修：</span>面板 <code>v.setSpacing</code> 与设置窗 <code>f.setSpacing</code> 原为 10（刻度外），本轮统一改 12，
+设置窗实测因此由 540 变 570（仍在屏内）。</p>
+
+<h2 id="s5">5 · 动效：什么能动、什么不能动</h2>
+<table>
+<tr><th>场景</th><th>时长</th><th>缓动</th><th>动什么</th></tr>
+<tr><td>面板展开/收起</td><td>180ms</td><td>OutCubic</td><td>窗口 <code>geometry</code> 宽 26↔352，面板 x 同步滑</td></tr>
+<tr><td>卡片弹出</td><td>180ms</td><td>OutCubic</td><td><code>windowOpacity</code> 0→1 + <code>pos</code> 从 +10px 上来</td></tr>
+<tr><td>卡片长高</td><td>160ms</td><td>OutCubic</td><td><code>geometry</code> 高度，锚左上</td></tr>
+<tr><td>卡片关闭</td><td>120ms</td><td>InCubic</td><td>淡出，<b>动画结束才 <code>hide()</code></b></td></tr>
+<tr><td class="ok">设置对话框进/出（本轮补）</td><td>120ms</td><td>In/Out</td><td><code>windowOpacity</code>；出场统一走 <code>Settings.done()</code>，动画结束才真的关闭</td></tr>
+<tr><td class="ok">托盘菜单进场（本轮补）</td><td>120ms</td><td>OutCubic</td><td>菜单 <code>windowOpacity</code> 0→1；<b>只做进不做出</b></td></tr>
+</table>
+<ul>
+<li><strong>禁区：</strong>只动 <code>geometry / pos / windowOpacity</code>；不动 min/max 尺寸（会重算 QSS 抖动）；
+所有动画对象走 <code>_anim()</code> 留引用；浮层窗口的 <code>WA_ShowWithoutActivating</code> 全程保持，动画期间不抢焦点。</li>
+<li><strong>合并连发：</strong>长高有 <code>_resizing</code> 闸门 + 高差&lt;20px 跳过；关闭有 <code>_closing</code> 闸门。</li>
+<li><strong>QMenu 为什么只做进：</strong>菜单收起由 Qt 内部即时处理，拿不到稳定的"关闭前"时刻，硬做淡出会先隐藏再动画＝闪。</li>
+</ul>
+
+<h2 id="s6">6 · 可访问性（实算对比度）</h2>
+<p class="note">按 WCAG 相对亮度公式实算，不是目视估；背景取 <code>surface #0d0d0d</code>（卡片与面板的实际底色）。</p>
+<table>
+<tr><th>前景</th><th class="num">对比度</th><th>判定</th><th>约束</th></tr>
+<tr><td><code>ink #f4f4f6</code></td><td class="num">17.69:1</td><td class="ok">AAA</td><td>词头、释义，随便用</td></tr>
+<tr><td><code>body #cdcdcd</code></td><td class="num">12.23:1</td><td class="ok">AAA</td><td>正文</td></tr>
+<tr><td><code>mute #9c9c9d</code></td><td class="num">7.09:1</td><td class="ok">AA</td><td>音标、备注、元信息</td></tr>
+<tr><td><code>blue #57c1ff</code></td><td class="num">9.70:1</td><td class="ok">AA</td><td>强调与来源徽章</td></tr>
+<tr><td><code>ash #6a6b6c</code></td><td class="num">3.64:1</td><td class="warn">低于 4.5</td><td><b>只允许用于禁用态与装饰</b>（细边上的 SnapWord 竖排字），<b>不得承载正文</b></td></tr>
+<tr><td>主按钮：字 <code>canvas</code> 底 <code>blue</code></td><td class="num">10.00:1</td><td class="ok">AAA</td><td>主按钮组合安全</td></tr>
+<tr><td>描边 <code>hairline</code> vs 底色</td><td class="num">1.29:1</td><td class="note">装饰性</td><td>1px 描边只做边界，不承担信息；聚焦态必须换 <code>hairline-strong</code>（1.62:1）</td></tr>
+<tr><td>色阶差 <code>elevated</code> vs <code>surface</code></td><td class="num">1.03:1</td><td class="bad">几乎不可辨</td><td>这就是 §0 第 1 条：层次靠描边</td></tr>
+<tr><td>旧聚焦描边 <code>hairline-strong</code></td><td class="num">1.62:1</td><td class="bad">低于 3:1</td><td>已废弃为聚焦色，改 <code>blue</code>（9.70:1）；它仍可用于分隔线与 hover 描边</td></tr>
+<tr><td>新聚焦环 <code>blue</code> vs 底色</td><td class="num">9.70:1</td><td class="ok">远超 3:1</td><td>按钮/输入框/下拉框/复选框统一用这一条</td></tr>
+</table>
+
+<h2 id="s7">7 · 已落地清单与实测证据</h2>
+<p>本轮改动全部落在 <code>src/snapword/gui.py</code>，不碰行为逻辑、不动热键/OCR/查词/config 结构、不加新依赖。</p>
+<table>
+<tr><th>#</th><th>改动</th><th>所在</th><th class="num">验证结果</th></tr>
+<tr><td>1</td><td>词胶囊改走 <code>#chip</code>（9999 圆角 / 11px / padding 2 8）+ hover/pressed 反馈，并加手型光标</td><td>QSS <code>#chip</code>、<code>Card._fill_chips</code></td><td class="num">高度 32 → <b>24</b></td></tr>
+<tr><td>2</td><td>关闭按钮 <code>✕</code> 降权为 ghost</td><td><code>Card._build</code></td><td class="num">objectName=<code>ghost</code></td></tr>
+<tr><td>3</td><td>面板 / 细边圆角 12 → 10</td><td>QSS <code>#dockpanel</code>、<code>#dockrail</code></td><td class="num">回到令牌刻度</td></tr>
+<tr><td>4</td><td>设置对话框补淡出（<code>done()</code> 先动画后 close + 重入闸门）</td><td><code>Settings.done</code></td><td class="num"><code>result()=1</code> 且已隐藏</td></tr>
+<tr><td>5</td><td>托盘菜单补淡入（<code>eventFilter</code> 动 <code>windowOpacity</code>）</td><td><code>Tray</code></td><td class="num">40ms 0.42 → 300ms 1.00</td></tr>
+<tr><td>6</td><td>聊天人名三色、框选描边、托盘图标色收进令牌</td><td><code>Card</code>、<code>Selector</code>、<code>Tray</code></td><td class="num">grep 无表外色值</td></tr>
+<tr><td>7</td><td>下拉框 padding 6→7，站到 32px</td><td>QSS <code>QComboBox</code></td><td class="num">30 → <b>32</b></td></tr>
+<tr><td>8</td><td>删除重复的 <code>#panelword</code> 规则；<code>blue-soft</code> 0.16→0.15 与文档一致</td><td>QSS / <code>T</code></td><td class="num">同文档</td></tr>
+<tr><td>9</td><td>面板与设置窗的组内间距 10 → 12</td><td><code>Dock._build</code>、<code>Settings.__init__</code></td><td class="num">设置窗 540 → 570</td></tr>
+<tr><td>10</td><td>子菜单「面板挂在哪块屏」也纳入淡入（判定由"只认主菜单"放宽为任意 <code>QMenu</code>）</td><td><code>Tray.eventFilter</code> / <code>attach_dock</code></td><td class="num">与主菜单同节奏</td></tr>
+<tr><td>11</td><td><strong>键盘焦点环</strong>：按钮 / 输入框 / 下拉框 / 复选框的 <code>:focus</code> 一律换 <code>blue</code> 描边（原来只有输入框有，且用的是 <code>hairline-strong</code>）</td><td>QSS <code>*:focus</code></td><td class="num">实测描边 = <code>#57c1ff</code></td></tr>
+<tr><td>12</td><td><strong>卡片空态</strong>：查不到释义时那一行切 <code>#empty</code>（<code>mute</code>/13px/上下 8px），不再和正常释义一个量级</td><td><code>Card.show_brief</code> + QSS <code>#empty</code></td><td class="num">objectName 双向切换通过</td></tr>
+<tr><td>13</td><td>内边距刻度清扫：菜单项 18→16、tooltip 6→8、正文框 10→12</td><td>QSS</td><td class="num">全部回到 6/7/8/12/16</td></tr>
+<tr><td>14</td><td><strong>细边整体自绘</strong>（<code>class Rail</code>）：monogram 方块 + "SnapWord" 整词旋转竖排 + 状态箭头，删掉"一个字母一行"的散排</td><td><code>Rail</code> / <code>Dock._build</code></td><td class="num">子标签数 = 0</td></tr>
+<tr><td>15</td><td><strong>悬停光边</strong>：左内缘 2px 蓝条 0→40 生长动画（<code>QtCore.Property</code> barH）</td><td><code>Rail</code></td><td class="num">悬停=40 / 离开=0</td></tr>
+<tr><td>16</td><td><strong>质感三件套</strong>：卡片 card→surface 竖向渐变 + 顶沿 hairline-strong 受光；主按钮 blue-hover→blue 渐变；面板 <code>#streak</code> 渐隐蓝线</td><td>QSS</td><td class="num">像素采样证实渐变</td></tr>
+<tr><td>17</td><td><strong>整圆胶囊修复</strong>：9999px 在 Qt 里静默变直角 → <code>#chip</code> 8px / <code>#pill</code> 12px（按控件半高取值）</td><td>QSS + <code>_fill_chips</code></td><td class="num">左缘描边 24 行 → 4 行</td></tr>
+<tr><td>18</td><td>展开缓动 OutCubic → OutQuint（抽屉手感）</td><td><code>Dock._place</code></td><td class="num">—</td></tr>
+</table>
+
+<h3>验证手段（可重复执行）</h3>
+<pre style="background:var(--elevated);border:1px solid var(--hairline);border-radius:8px;padding:12px;color:var(--body);font-size:12.5px;overflow:auto">
+cd F:\SnapWord
+# ① headless 重渲 + 几何 + 令牌色采样 + 动画断言（新增 tmp/ui_audit.py，只依赖已装好的 PySide6）
+QT_QPA_PLATFORM=offscreen .venv\Scripts\python.exe tmp\ui_audit.py     → 0 项未过
+# ② 界面仍是贴边的：宣告面板/展开两态都验了一遍
+QT_QPA_PLATFORM=offscreen SNAPWORD_DEMO=dock-expanded SNAPWORD_SHOT=tmp\ui-shots2\dock-open.png .venv\Scripts\python.exe -m snapword.gui
+  dock: geo=QRect(448,250,352,300) 右边缘=800 屏右边缘=800 贴边=True
+# ③ 单元测试
+.venv\Scripts\python.exe tests\test_core.py                            → 25/25 passed
+# ④ 没有引入 PySide6 之外的 import
+grep -E "^(from|import) " src\snapword\gui.py                          → 与改前逐行一致
+</pre>
+<p><strong>同一套断言跑改前版本（HEAD 8c23392）</strong>会得到 3 项未过：胶囊 32px、胶囊无 <code>#chip</code> 样式、关闭按钮非 ghost——
+说明上面的数字是前后对比出来的，不是自证。</p>
+
+<h2 id="s8">8 · 下一步路线图</h2>
+<table>
+<tr><th style="width:8%">优先级</th><th>事项</th><th>为什么</th></tr>
+<tr><td>P1</td><td>正文行高 1.6 目前只在规范里，<code>QLabel</code> 纯文本落不了 <code>line-height</code></td><td>要落地就得把 <code>lb_cn</code> 转成富文本并自行转义，牵动文本处理路径；先记成已知偏离，别偷偷改</td></tr>
+<tr><td>P2</td><td>禁用态自查：<code>ash</code> 只有 3.64:1，确认没有用它承载正文</td><td>§6 的实测结论需要落到代码约束上（目前只有 <code>QPushButton:disabled</code> 用它，合规）</td></tr>
+<tr><td>P2</td><td>卡片按钮行在"生成中"等忙态下没有独立的忙/禁用表达</td><td>现状是按钮改文字，视觉权重不变；属于状态表达缺口，需要动行为逻辑，单独立项</td></tr>
+<tr><td>P3</td><td>把 <code>tmp/ui_audit.py</code> 挪成正式的自检入口</td><td>本轮它已经抓到一次真实回归（QSS 注释截断），值得常驻</td></tr>
+</table>
+
+<h2 id="s9">9 · 七条批评的整改对照（2026-09-29）</h2>
+<p>逐条给了证据与处置——有三条被证实并修掉，两条被<strong>证伪</strong>（实测本来就没问题），两条属于平台规范差异或产品本质，记录取舍。</p>
+<table>
+<tr><th style="width:16%">批评</th><th>取证结论</th><th style="width:38%">处置</th></tr>
+<tr><td>① 诡异感</td><td>Esc 关闭、复制后"已复制"反馈<strong>本来就有</strong>（核过代码）；缺的是可发现性</td><td>✕ 补 tooltip"关闭（也可以按 Esc）"；"问 AI"改"问 AI ▾/▴"，展开控件要有展开的样子</td></tr>
+<tr><td>② 出乎意料</td><td>词胶囊看着像标签、点下去是查词——已有手型光标 + 悬停变色 + tooltip；"问 AI"点了不是跳转而是展开，之前没预告</td><td>展开指示（▾/▴）；胶囊交互态在 §3.1 状态矩阵里成文，交给使用者预期</td></tr>
+<tr><td>③ 跳脱感</td><td>无边框自绘浮窗是产品本质（贴屏浮层），消不掉；但自创<strong>参数</strong>能消</td><td>卡片/面板圆角 10 → <strong>8</strong>（Windows 11 Fluent 浮层就是 8px）；菜单、托盘气泡、tooltip、滚动条、字体全部已是系统向；"保存"用系统对话框默认按钮的强调色做法</td></tr>
+<tr><td>④ 脆弱感 <span class="bad">实锤</span></td><td>12 个长短语胶囊挤一行被压到 <strong>28px</strong>、文字被裁；45 字母单词无断点，换行救不了，被压到 255px 后<strong>连省略号都没有</strong>；详解超长时卡片可能顶出屏幕</td><td>FlowLayout 换行（4 组极端输入验证不裁不压）；词头 260px 上限省略号 + tooltip 看全；详解/对话上限 = 45% 屏高；<code>_place</code> 上下夹住。<code>tmp/stress_audit.py</code> 固化成 14 条断言</td></tr>
+<tr><td>⑤ 信息缺组织</td><td>释义、英文、对照、备注平铺一列；设置窗 12 行无分组</td><td>卡片用分隔线分成"答案 / 补充信息"两组；设置窗按<strong>基本 / 屏幕识别 / 问答模型 / 进阶</strong>四组（轻量标题 <code>#sechead</code>，不加边框）</td></tr>
+<tr><td>⑥ 各论各的</td><td>按钮高度实测卡片 = 面板 = <strong>32px</strong>（这条被证伪）；"查剪贴板"（菜单）vs"剪贴板"（按钮）是<strong>平台规范差异</strong>：菜单项用动词短语、按钮用名词，不该拉齐</td><td>真正的差异只有设置窗按钮权重 → "保存"升级主按钮；其余保持并在文档记录理由</td></tr>
+<tr><td>⑦ 纯丑</td><td>令牌系统、光边、对比度在前两轮已建；本轮补齐长内容与表单的规范</td><td>新增 <code>#sechead</code> 令牌；两套尺度、圆角、长内容规则全部写进 <code>docs/UI-STYLE.md</code></td></tr>
+</table>
+
+<h3>9.1 onboarding 补课：DeepSeek 怎么接（2026-09-29）</h3>
+<p>设置窗里"DeepSeek 地址 / 模型 / Key"三行之前只有一行泛泛的脚注，用户拿到不知道：Key 去哪申请、
+填完算不算成功。现在 Key 框正下方挂一块 <code>#tip</code> 引导条，三段式——</p>
+<ul>
+<li><strong>先解除焦虑</strong>：第一行就说"不接也能用：问答默认走本地 9B（免费、不花 token）"，DeepSeek 是可选增强；</li>
+<li><strong>可执行的三步</strong>：① platform.deepseek.com 注册后在 API Keys 创建 → ② 复制 sk- 开头的 Key → ③ 粘进 Key 框保存；配一个「打开申请页」直达按钮（<code>QDesktopServices.openUrl</code>）；</li>
+<li><strong>确定答案</strong>：「测一下能不能通」——后台线程发一个只花 1 个 token 的请求（<code>providers.deepseek_up</code>，12 秒短超时），401/402/422 翻译成人话（"Key 不对或已失效"/"余额不足"/"检查模型名"），状态字绿=<code>green</code>、红=<code>red</code>，只在真有结论时才上语义色。</li>
+</ul>
+<p>状态机：没 Key → 显示三步 + 状态"还没接"；填了 Key → 三步收起、出现「测一下」；测完 → 绿/红结论。
+表单加长后装进滚动区并夹在屏高 90%（<code>Settings.showEvent</code> 首显按内容量一次尺寸）。</p>
+
+<footer>
+SnapWord 界面设计方案 v2 · 共 8 节 · 本页所有色值、圆角、尺寸均取自 <code>docs/UI-STYLE.md</code> 的令牌表，
+页面本身就是用这套令牌渲染的（Ctrl+F 搜 <code>--surface</code> 可对照）。
+</footer>
+
+</div></body></html>

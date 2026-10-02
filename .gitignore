@@ -34,3 +34,6 @@ tmp/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 自我评测的沙箱（Dock._save() 会往这里写 config，别提交）
+tests/_sandbox/

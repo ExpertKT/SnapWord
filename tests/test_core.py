@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -28,9 +29,60 @@ ROWS = [
 ]
 
 
+class Skip(Exception):
+    """环境不具备，这条断言本轮没法验证。
+
+    跟"通过"刻意分开：通过了是"验过没问题"，跳过是"没验"。报告里会单独列出来，
+    免得一看到满分就以为全都验过了。
+    """
+
+
 def _tmpdir():
     d = tempfile.mkdtemp(prefix="snapword-test-")
     return d
+
+
+def input_desktop_is_usable():
+    """这台机器/这个会话到底能不能注入按键。
+
+    会话 0 是服务会话（没有交互桌面），SendInput 在那里必然返回 0 + ERROR_ACCESS_DENIED，
+    跟 INPUT 结构对不**完全**无关。CI、沙箱、被远程桌面抢了前台都会命中。
+    只有"环境确实给注入"时，拿 SendInput 的返回值当判据才有意义。
+    """
+    if sys.platform != "win32":
+        return False, "非 Windows"
+    import ctypes
+    from ctypes import wintypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+    # 64 位下不声明 restype，句柄会被截成 32 位，OpenProcessToken 直接 ERROR_INVALID_HANDLE
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.GetCurrentProcess.argtypes = []
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                     ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+
+    tok = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k.GetCurrentProcess(), 8, ctypes.byref(tok)):
+        return False, "拿不到进程令牌（%d）" % ctypes.get_last_error()
+    sess = wintypes.DWORD()
+    n = wintypes.DWORD()
+    adv.GetTokenInformation(tok, 24, ctypes.byref(sess), 4, ctypes.byref(n))
+    if sess.value == 0:
+        return False, "会话 ID=0（服务会话，没有可交互桌面，SendInput 必然被拒）"
+
+    # 窗口站不可见 = 不是交互桌面，同样注入不了
+    WSF_VISIBLE = 0x0001
+    flags = ctypes.c_ulong()
+    got = wintypes.DWORD()
+    if user32.GetUserObjectInformationW(user32.GetProcessWindowStation(), 1,
+                                        ctypes.byref(flags), 4, ctypes.byref(got)):
+        if not (flags.value & WSF_VISIBLE):
+            return False, "窗口站不可见（非交互桌面）"
+    return True, "会话 ID=%d" % sess.value
 
 
 def make_dict():
@@ -136,6 +188,23 @@ def test_offline_miss_without_providers_returns_none_source():
     assert b["notes"], "没查到要给出人话原因"
 
 
+def test_detail_without_any_model_answers_at_once_and_says_how_to_get_one():
+    """一个模型都接不上时，detail() 不能返回 None —— 卡片会显示"没能生成详解：模型没返回内容"，
+    而真实原因八成是这台机器压根没接模型（不是每个用户都有本地 9B，也不是每个都去申请 key）。
+    也不能去等超时（原来写 300 秒，用户眼里就是卡死）：要立刻把词典里有的摊开 + 写清怎么接模型。"""
+    dd = make_dict()
+    cd = os.path.join(_tmpdir(), "c.db")
+    lk = Lookup(cfg_for(dd, cd), dic=Ecdict(dd), cache=Cache(cd))
+    b = lk.brief("run")
+    t0 = time.monotonic()
+    md = lk.detail(b)
+    took = time.monotonic() - t0
+    assert took < 2.0, "没接模型还去等超时了：%.2f 秒" % took
+    assert md and "词典释义" in md and "Ollama" in md, md
+    hit = lk.cache.get("run") or {}
+    assert not hit.get("detail"), "兜底文案不能进缓存：接上模型后要能重新生成真的"
+
+
 def test_dict_and_cache_are_usable_from_a_worker_thread():
     """查词全在后台线程里跑。连接忘了 check_same_thread=False 会当场炸
     （SQLite objects created in a thread can only be used in that same thread）——
@@ -172,6 +241,12 @@ def test_input_struct_is_big_enough_for_sendinput():
     from snapword import winput
 
     assert ctypes.sizeof(winput._INPUT) in (28, 40), ctypes.sizeof(winput._INPUT)
+    # 上面那条是纯结构检查，任何环境都验得了；下面这条要靠真的注入一次按键，
+    # 得先确认这个会话有可交互桌面，否则 SendInput 一律 ERROR_ACCESS_DENIED(5)，
+    # 拿它当判据只会得到假失败。
+    ok, why = input_desktop_is_usable()
+    if not ok:
+        raise Skip("SendInput 实注跳过：%s" % why)
     # VK_F24 什么功能都没有，按一下不影响任何人；结构不对时这里会得到 0
     seq = (winput._INPUT * 2)(winput._key(0x87), winput._key(0x87, True))
     n = winput.user32.SendInput(2, ctypes.byref(seq), ctypes.sizeof(winput._INPUT))
@@ -470,14 +545,21 @@ TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") a
 
 def main():
     bad = 0
+    skipped = 0
     for name, fn in TESTS:
         try:
             fn()
             print("  [OK] %s" % name)
+        except Skip as ex:
+            skipped += 1
+            print("  [SKIP] %s -> %s" % (name, ex))
         except Exception as ex:
             bad += 1
             print("  [X]  %s -> %s: %s" % (name, type(ex).__name__, ex))
-    print("%d/%d passed" % (len(TESTS) - bad, len(TESTS)))
+    # 跳过的不能算"通过"：通过了是验过没问题，跳过是根本没验。
+    print("%d/%d passed" % (len(TESTS) - bad - skipped, len(TESTS)))
+    if skipped:
+        print("%d skipped" % skipped)
     return 1 if bad else 0
 
 

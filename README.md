@@ -121,8 +121,27 @@ tools\ocr_bench.py    OCR 识别能力的自迭代测试台（判定 + 归因 + 
 tools\ocr_audit.py    OCR 失败反思：把失败条目交给本地 9B 说病因/下一步（不用联网）
 tools\make_icon.py    生成 assets\snapword.ico（和托盘图标同一套画法，桌面快捷方式用）
 assets\snapword.ico   应用图标（想在桌面放快捷方式就指到 .venv\Scripts\pythonw.exe -m snapword.gui）
-tests\test_core.py    裸断言，无框架：python tests\test_core.py
-docs\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
+tests\test_core.py    裸断言，无框架：python tests\test_core.py（查词/缓存/兜底）
+tests\test_ui.py      界面与交互的裸断言（headless，33 条）：python tests\test_ui.py
+tests\run_all.py      自我评测总入口：python tests\run_all.py --min 100（当回归闸门用）
+docs\          截图 + UI-STYLE.md（配色令牌/动效）+ SELFTEST.md（评测报告）
+```
+
+## 自我评测（改完 UI 先跑这个）
+
+```
+.venv\Scripts\python.exe tests\run_all.py            # 打印维度分 + 总分
+.venv\Scripts\python.exe tests\run_all.py --min 100  # 低于 100 就退出码 1（闸门）
+.venv\Scripts\python.exe tests\run_all.py --out docs\SELFTEST.md
+```
+
+评分是 可用性 60 + 特色性 40：
+核心逻辑 / 冷启动 / 极端数据 / 令牌一致性 / 可访问性 / 状态完整 / 键盘与习惯，
+以及 光边 / 自绘品牌 / 质感 / 入门引导 / 动效。维度分 = 权重 ×(通过的断言数 / 该维度断言总数)。
+
+**这份分只能证明"我列出来的这些项没退化"，不能证明界面好看**——断言是我自己写的，
+覆盖不到的地方照样会丑。它是回归闸门，不是审美裁判：看不顺眼的地方要补成新断言，
+再让改动去满足它。\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
 ```
 
 OCR 是**复用 SnapWheel 的 C# 源码**编出来的 `helper\ocr-helper.exe`，两个引擎 + 两套模型：

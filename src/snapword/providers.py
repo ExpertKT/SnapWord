@@ -115,6 +115,46 @@ def ollama_up(url, timeout=1.5, ttl=30):
     return ok
 
 
+def deepseek_up(url, key, model=None, timeout=12):
+    """DeepSeek 通不通？设置窗里那个「测一下」用它：发一个只要 1 个 token 的请求。
+
+    返回 `(能不能用, 人话说明)`。不给 180 秒——设置窗里让人干等就是折磨，这里只等 12 秒，
+    并且把 401/402/422 这几类"钥匙问题"翻译成人能看懂的话。
+    """
+    if not (url or "").strip():
+        return False, "还没填地址"
+    if not (key or "").strip():
+        return False, "还没填 Key"
+    body = json.dumps({
+        "model": (model or "deepseek-chat").strip(),
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False, "max_tokens": 1,
+    }).encode("utf-8")
+    # 不走 chat()：chat() 会因为空 content 抛错，而这里本来就不想要正文
+    try:
+        txt = _http(url.strip(), body,
+                    {"Content-Type": "application/json",
+                     "Authorization": "Bearer " + key.strip()},
+                    timeout)
+        j = json.loads(txt)
+        if j.get("choices") or j.get("model") or j.get("id"):
+            return True, "Key 有效，能连通"
+        return False, "返回了看不懂的内容：" + txt[:80]
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        if code in (401, 403):
+            return False, "Key 不对或已失效（%d）" % code
+        if code == 402:
+            return False, "余额不足（%d）：去控制台充一点，或换个 Key" % code
+        if code == 422:
+            return False, "参数被拒（%d）：检查模型名填对了没" % code
+        if code == 429:
+            return False, "请求太密（%d）：稍等一下再试" % code
+        return False, "服务端返回 %d" % code
+    except Exception as ex:
+        return False, "%s：%s" % (type(ex).__name__, str(ex)[:120])
+
+
 def youdao(word, timeout=10):
     """有道免费 demo 接口。单词会带回 basic（音标 + 释义），句子只回译文。"""
     data = urllib.parse.urlencode({"q": word, "from": "en", "to": "zh-CHS"}).encode("utf-8")

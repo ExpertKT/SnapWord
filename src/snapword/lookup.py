@@ -19,6 +19,10 @@ WORD_RE = re.compile(r"^[A-Za-z][A-Za-z'\u2019\-]*$")
 OCR_STRONG = 10.0
 _OCR_TOK = re.compile(r"[A-Za-z][A-Za-z'\u2019\-]{0,40}")
 
+# 详解最多等多久。原来写 300 秒 —— 模型冷加载 + 慢机器上那就是用户眼里的"卡死"，
+# 而卡片上只有一句「生成中…」，分不清是在想还是已经死了。冷启动实测 13 秒。
+DETAIL_TIMEOUT = 120
+
 
 DETAIL_SYS = (
     "你是一位英语词典编辑，服务对象是中国的大学英语学习者（词汇量约 4000~6000）。"
@@ -173,6 +177,11 @@ class Lookup:
             cn = [y["translation"]]
         if not cn:
             return None
+        # 有道查不到这个词时会把**原词原样回显**（实测 zzqxyzzy → ['zzqxyzzy']）。
+        # 那不是释义，拿它当结果就等于"识别出来的解释是英文"，而且会把后面的百度翻译、
+        # 本地 9B 初稿全挡住（它们是按顺序兜底的）。所以原样回显一律视为未命中。
+        if all(c.strip().lower() == t.strip().lower() for c in cn):
+            return None
         return {
             "kind": "word" if self.is_word(t) else "phrase",
             "query": t,
@@ -263,23 +272,31 @@ class Lookup:
                 return hit["detail"]
 
         msgs = self._detail_messages(brief)
-        text, src = None, None
+        p = self.cfg["providers"]["ollama"]
         ds = self.cfg["providers"]["deepseek"]
+        can_ds = bool(ds.get("enabled") and ds.get("key"))
         use_ds = brief.get("source") == "ecdict" or brief.get("prefer") == "deepseek"
-        if ds.get("enabled") and ds.get("key") and use_ds:
+        local_up = bool(p.get("enabled")) and providers.ollama_up(p.get("url", ""))
+
+        # 一个模型都接不上就别去等超时：直接把词典里有的摊开，并说清怎么才能用上详解。
+        # （这类用户没有本地 9B、也不打算去申请 DeepSeek key —— 不能让他们对着转圈发呆。）
+        if not (can_ds or local_up):
+            return self._detail_offline(brief, "")
+
+        text, src, why = None, None, ""
+        if can_ds and use_ds:
             try:
                 text, src = providers.deepseek_chat(ds, msgs), "deepseek"
-            except Exception:
-                text = None
+            except Exception as ex:
+                why = "DeepSeek 没答上：" + str(ex)[:80]
+        if text is None and local_up:
+            try:
+                text = providers.ollama_chat(p, msgs, timeout=DETAIL_TIMEOUT)
+                src = "ollama"
+            except Exception as ex:
+                why = "本地模型没答上：" + str(ex)[:80]
         if text is None:
-            p = self.cfg["providers"]["ollama"]
-            if p.get("enabled"):
-                try:
-                    text, src = providers.ollama_chat(p, msgs, timeout=300), "ollama"
-                except Exception:
-                    text = None
-        if text is None:
-            return None
+            return self._detail_offline(brief, why)
 
         text = "> 详解来源：%s（词典释义为准）\n\n" % (
             "DeepSeek" if src == "deepseek" else "本地 9B（免费，仅供参考）"
@@ -287,6 +304,27 @@ class Lookup:
         if self.cache:
             self.cache.put_detail(word, text)
         return text
+
+    def _detail_offline(self, brief, why):
+        """接不上模型时的兜底详解（**不进缓存**：接上模型后要能重新生成真的）。
+
+        为什么不能返回 None：卡片会显示"没能生成详解：模型没返回内容"，而真实原因
+        八成是这台机器压根没接模型 —— 用户既看不懂，也不知道下一步该干什么。
+        """
+        out = ["> " + (why or "这台机器没接模型，先把词典里能给的都摊开"), ""]
+        if brief.get("cn"):
+            out += ["**词典释义**", ""] + ["- " + s for s in brief["cn"] if s.strip()] + [""]
+        if brief.get("en"):
+            out += ["**英文释义**", "", brief["en"], ""]
+        if brief.get("exchange"):
+            out += ["**词形变化**", "", brief["exchange"], ""]
+        if brief.get("tags"):
+            out += ["**考试标签**", "", " ".join(brief["tags"]), ""]
+        out += ["---", "",
+                "想要展开成六段详解（逐义项 / 搭配 / 例句 / 辨析 / 记忆法），两条路任选一条：",
+                "1. 本机装 Ollama 跑个小模型（免费、不出网），SnapWord 会自动用它；",
+                "2. 或在右下角「设置…」里填 DeepSeek key（几块钱能用很久）。"]
+        return "\n".join(out)
 
     def _detail_messages(self, brief):
         cn = "\n".join(brief.get("cn") or []) or "（无）"
