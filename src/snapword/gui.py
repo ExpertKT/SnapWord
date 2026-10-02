@@ -2208,9 +2208,13 @@ class _WordbookFold(QtWidgets.QWidget):
         self._progress = 0.0
 
     def start(self, pix, progress):
-        self._pix = pix
+        w, h = self.parentWidget().WB_W, self.parentWidget().PANEL_H
+        # grab() may be device-pixel sized on high-DPI Windows. Normalize the
+        # snapshot to widget coordinates so the final frame joins pixel-for-pixel.
+        self._pix = pix.scaled(w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                               QtCore.Qt.TransformationMode.SmoothTransformation)
         self._progress = max(0.0, min(1.0, float(progress)))
-        self.setGeometry(0, 0, self.parentWidget().WB_W, self.parentWidget().PANEL_H)
+        self.setGeometry(0, 0, w, h)
         self.show()
         self.update()
 
@@ -2234,9 +2238,16 @@ class _WordbookFold(QtWidgets.QWidget):
             # The outer edge advances faster; the stable hinge remains at x=w.
             x0 = w - (1.0 - u0) * w * self._progress
             x1 = w - (1.0 - u1) * w * self._progress
-            dst = QtCore.QRectF(x0, 0, max(0.5, x1 - x0), h)
+            # A folded OLED panel also foreshortens vertically: the outer
+            # facets turn away from the viewer, then recover exactly at 1.0.
+            turn = 1.0 - self._progress
+            facet = 0.72 + 0.28 * (1.0 - u0) + 0.28 * self._progress
+            facet = max(0.08, min(1.0, facet))
+            dh = h * facet
+            dst = QtCore.QRectF(x0, (h - dh) * 0.5,
+                                max(0.5, x1 - x0), dh)
             p.drawPixmap(dst, self._pix, src)
-            shade = int((1.0 - self._progress) * (75 + 15 * (1.0 - u0)))
+            shade = int(turn * (62 + 28 * u0) + (1.0 - facet) * 20)
             p.fillRect(dst, QtGui.QColor(0, 0, 0, shade))
         # The hinge catches a narrow highlight/shadow, like a folding display seam.
         seam = max(1, int(2 * self._progress))
