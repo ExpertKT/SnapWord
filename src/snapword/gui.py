@@ -2218,6 +2218,9 @@ class Dock(QtWidgets.QWidget):
         d = cfg.get("dock") or {}
         self.expanded = bool(d.get("expanded"))
         self.wb_open = bool(d.get("wb"))
+        # 记词板露出来多少（0..WB_W）：活板门是"掀开"而不是整块平移，所以
+        # 抽屉永远停在 x=0，靠 mask 把"已掀开的那条"裁出来 —— 见 _apply_mask()。
+        self._wb_reveal = float(self.WB_W if self.wb_open else 0)
         self._y = d.get("y")
         self._drag = None
         self._moved = False
@@ -2354,16 +2357,21 @@ class Dock(QtWidgets.QWidget):
         wv.addWidget(self.wb_empty)
         wbrow = QtWidgets.QHBoxLayout()
         wbrow.setSpacing(8)
+        self.btn_wb_copy = SmoothButton("复制全部", "ghost")
+        self.btn_wb_copy.setToolTip("把整板的词按行复制进剪贴板")
+        self.btn_wb_copy.clicked.connect(self._wb_copy_all)
         self.btn_wb_export = SmoothButton("导出", "ghost")
         self.btn_wb_export.setToolTip("导出成 Markdown 或 CSV（按扩展名自动选）")
         self.btn_wb_export.clicked.connect(self._wb_export)
         self.btn_wb_clear = SmoothButton("清空", "ghost")
         self.btn_wb_clear.clicked.connect(self._wb_clear)
+        wbrow.addWidget(self.btn_wb_copy, 1)
         wbrow.addWidget(self.btn_wb_export, 1)
         wbrow.addWidget(self.btn_wb_clear, 1)
         wv.addLayout(wbrow)
-        # 关着的抽屉停在 x=WB_W（面板正后方，看不见）；_place() 会按 wb_open 摆一次
-        self.wbpanel.move(self.WB_W, 0)
+        # 抽屉永远停在窗口最左边 x=0；关着的时候靠 mask（_apply_mask）把它整条裁掉，
+        # 所以关→开是"掀开"（可见宽度 0→WB_W），不是整块滑进来。
+        self.wbpanel.move(0, 0)
         self.wbpanel.setVisible(self.wb_open)
         # 记词板是"从面板背后抽出来的抽屉"：关着的时候它就停在面板正后方（同一个 x），
         # 所以面板必须压在它上面 —— 这条 raise_ 是那扇门的"门框"。
@@ -2377,32 +2385,40 @@ class Dock(QtWidgets.QWidget):
 
     # ---------- 记词板 ----------
     def toggle_wordbook(self):
-        """"活板门"：记词板是压在主面板**背后**的抽屉，从面板下面往左抽出来。
+        """「活板门」：记词板是窗口最左边那一扇，打开是"掀开"，不是整块平移。
 
-        方向和手感：关闭位在窗口内 x=WB_W（正好被主面板盖住，看不见），打开位 x=0。
-        于是动画是 x 由大到小 —— **从右往左滑出来**（旧版是从窗口左边缘 x=-WB_W 滑到 0，
-        也就是从左往右，用户报的"弹反了"就是这个；窗口左侧本来就是透明的，
-        从那边进场看起来像从屏幕外飞进来，而不是从面板里抽出来）。
-        曲线用 OutBack：抽出来时过冲一点点再回弹，这一下就是"活板门"的手感。
+        为什么不是平移：抽屉原来从 x=WB_W 滑到 x=0（整块滑出来），用户报"不像活板门"。
+        现在抽屉**永远停在窗口内 x=0**，掀开的只是 mask 里属于它的那一条：可见宽度
+        0→WB_W，铰链在靠面板那一侧（抽屉的右边 x=WB_W），所以离铰链越远的像素出现得
+        越晚——内容本身一动不动，被"门缝"逐格照亮。这就是掀盖/翻门的手感。
+        曲线 OutCubic（开）/ InCubic（关）：门是"荡开、收住"，不用过冲回弹。
         """
         self.wb_open = not self.wb_open
         self.refresh_wordbook()
-        hidden = QtCore.QPoint(self.WB_W, 0)
+        self.wbpanel.move(0, 0)
         if self.wb_open:
-            self.clearMask()             # 动画期间整窗可画（mask 会把滑动中的抽屉裁掉）
             self.wbpanel.setVisible(True)
-            # setVisible(True) 会把抽屉顶到最上层，而它必须**在面板下面**（不然看起来是
-            # 盖着面板滑，而不是从面板背后抽出来）。所以每次露头都重新压回面板之下。
+            # setVisible(True) 会把抽屉顶到最上层，而它必须**在面板下面**（不然掀开时是
+            # 盖着面板翻，而不是从面板背后翻开）。所以每次露头都重新压回面板之下。
             self.panel.raise_()
             self.rail.raise_()
             self.grip.raise_()
-            self.wbpanel.move(hidden)
-            _anim(self.wbpanel, b"pos", hidden, QtCore.QPoint(0, 0),
-                  DUR["base"], curve=QtCore.QEasingCurve.Type.OutBack, done=self._settle)
-        else:
-            _anim(self.wbpanel, b"pos", self.wbpanel.pos(), hidden,
-                  DUR["base"], curve=QtCore.QEasingCurve.Type.InCubic, done=self._settle)
+        _stop_anims(self.wbpanel, b"pos")       # 旧版留下过的位移动画：别让两层动画打架
+        a = QtCore.QVariantAnimation(self)
+        a.setStartValue(float(self._wb_reveal))
+        a.setEndValue(float(self.WB_W if self.wb_open else 0.0))
+        a.setDuration(1 if REDUCE["on"] else int(DUR["base"]))
+        a.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic if self.wb_open
+                         else QtCore.QEasingCurve.Type.InCubic)
+        a.valueChanged.connect(lambda v: self._set_wb_reveal(float(v)))
+        a.finished.connect(self._settle)
+        self._wb_anim = a                        # 留引用：被 GC 掉门就停在半开
+        a.start()
         self._save()
+
+    def _set_wb_reveal(self, v):
+        self._wb_reveal = v
+        self._apply_mask()
 
     def _wb_counts(self):
         if self.wb is None:
@@ -2448,6 +2464,11 @@ class Dock(QtWidgets.QWidget):
         b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                         QtWidgets.QSizePolicy.Policy.Fixed)
         h.addWidget(b, 1)
+        cp = SmoothButton("⧉", "ghost")
+        cp.setFixedWidth(30)
+        cp.setToolTip("复制这个单词")
+        cp.clicked.connect(lambda _=False, w=word, btn=cp: self._wb_copy(w, btn))
+        h.addWidget(cp)
         star = SmoothButton("★" if it.get("mastered") else "☆", "ghost")
         star.setFixedWidth(30)
         star.setToolTip("点一下取消「已掌握」" if it.get("mastered") else "标成「已掌握」（沉到列表底部）")
@@ -2470,6 +2491,29 @@ class Dock(QtWidgets.QWidget):
         if self.wb is not None:
             self.wb.remove(word)
         self.refresh_wordbook()
+
+    def _wb_copy(self, word, btn=None):
+        """复制单个词：剪贴板 + 按钮绿闪 + 底部提示（三处反馈，用户才知道点到了）。"""
+        QtWidgets.QApplication.clipboard().setText(word)
+        if btn is not None:
+            btn.flash_success()
+        self.set_hint("已复制：%s" % word)
+
+    def _wb_copy_all(self):
+        """整板的词按行复制（一行一个，直接粘进生词本/Anki 那种地方）。"""
+        if self.wb is None:
+            return
+        try:
+            words = [it["word"] for it in self.wb.items()]
+        except Exception:
+            traceback.print_exc()
+            return
+        if not words:
+            self.set_hint("记词板还是空的")
+            return
+        QtWidgets.QApplication.clipboard().setText("\n".join(words))
+        self.btn_wb_copy.flash_success()
+        self.set_hint("已复制 %d 个词到剪贴板" % len(words))
 
     def _wb_clear(self):
         if self.wb is None or not self._wb_counts()[0]:
@@ -2515,7 +2559,7 @@ class Dock(QtWidgets.QWidget):
             # 主面板收回去时记词板一起收：那扇门本来就没有"自己单独开着"的样子
             # （它的开关按钮在主面板里，展开时才有）。
             self.wb_open = False
-            self.wbpanel.move(self.WB_W, 0)
+            self._wb_reveal = 0.0
             self.wbpanel.setVisible(False)
         self._apply(animate=True)
         if self.expanded:
@@ -2579,9 +2623,7 @@ class Dock(QtWidgets.QWidget):
         if not animate:
             self.panel.move(x0 if self.expanded else x_hidden, 0)
             self.panel.setVisible(self.expanded)
-            self.wbpanel.move(0 if self.wb_open else self.WB_W, 0)
-            self.wbpanel.setVisible(self.wb_open)
-            self._settle()
+            self._settle()                       # 抽屉位置/mask 由 _settle 统一摆
             return
         # 起点用**当前**位置而不是写死的端点：连点细边时（上一个动画还没跑完就反向），
         # 从当前位置接着走才不会跳一下。
@@ -2601,27 +2643,36 @@ class Dock(QtWidgets.QWidget):
         窗口是固定宽度的一块（记词板宽 + 主面板宽 + 缝 + 细边），收起时大部分是透明的：
         不设 mask 的话，鼠标点到那块透明区域点到的是这个窗口而不是背后的应用（透明窗口
         照样吃点击）。所以可点区域要**逐块**裁出来：细边永远算，主面板展开才算，记词板
-        开着才算。
+        按 `_wb_reveal`（掀开到哪）算。
         """
         x0 = self.WB_W
         x_rail = x0 + self._pan_w + 6
         self.rail.setGeometry(x_rail, 0, self.RAIL_W, self.PANEL_H)
         self.panel.setVisible(self.expanded)
         self.panel.move(x0 if self.expanded else x0 + self._pan_w + self.RAIL_W, 0)
+        self.wbpanel.move(0, 0)                 # 抽屉位置恒定，露多少由 mask 决定
         self.wbpanel.setVisible(self.wb_open)
-        self.wbpanel.move(0 if self.wb_open else self.WB_W, 0)
-        reg = QtGui.QRegion(x_rail, 0, self.RAIL_W, self.PANEL_H)
-        if self.expanded:
-            reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
-        if self.wb_open:
-            reg = reg.united(QtGui.QRegion(0, 0, self.WB_W, self.PANEL_H))
-        self.setMask(reg)
+        self._wb_reveal = float(self.WB_W if self.wb_open else 0)
+        self._apply_mask()
         # 抽屉永远压在面板之下（setVisible 之后 Qt 会重新排 z 序，所以这里每次都要重申）
         self.panel.raise_()
         self.rail.raise_()
         self.grip.setGeometry(0, 0, 6, self.PANEL_H)
         self.grip.raise_()
         self.raise_()
+
+    def _apply_mask(self):
+        """可点/可画区域 = 细边 ∪ 主面板（展开时）∪ 已掀开的那条记词板。"""
+        x0 = self.WB_W
+        x_rail = x0 + self._pan_w + 6
+        reg = QtGui.QRegion(x_rail, 0, self.RAIL_W, self.PANEL_H)
+        if self.expanded:
+            reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
+        r = int(round(min(max(self._wb_reveal, 0.0), float(self.WB_W))))
+        if r > 0:
+            # 铰链在靠面板那一侧：露出来的是 [WB_W-r, WB_W) 这一条
+            reg = reg.united(QtGui.QRegion(x0 - r, 0, r, self.PANEL_H))
+        self.setMask(reg)
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -2708,6 +2759,9 @@ class Settings(QtWidgets.QDialog):
     def __init__(self, cfg, parent=None, dock=None):
         super().__init__(parent)
         self.cfg = cfg
+        # 注意：self.dock 这个名字在本类里已经被"挂一个常驻面板"那个勾选框占了（apply() 用），
+        # 常驻面板本体放这儿，定位时要问它在哪块屏。
+        self.dock_panel = dock
         self.setWindowTitle("SnapWord 设置 · v%s" % __version__)
         self.setMinimumWidth(460)
         self.setStyleSheet(QSS)
@@ -2971,11 +3025,26 @@ class Settings(QtWidgets.QDialog):
             # **但不许顶到 maximumHeight**：顶满的话矮屏上永远"刚好装下"，滚动条永远不出现
             # （用户看到的就是"设置不能滚"）。夹到可用屏高的 80%，想更大自己拖。
             self._fit = True
-            screen = self.screen() or QtWidgets.QApplication.primaryScreen()
-            avail_h = screen.availableGeometry().height() if screen else 900
+            # 挂到**常驻面板所在那块屏**上（面板挂哪块屏是设置里的选项），并且居中。
+            # 原来什么定位都不做，交给 Windows 摆：实测它摆到 y=357，而窗子高 921，
+            # 于是尾巴垂到屏幕外 126px —— 之后拖上/下边，系统一边重排一边缩，手感就是
+            # 用户报的"极其灵敏、上下两边同时动"。居中夹进可用区就没了。
+            panel = getattr(self, "dock_panel", None)
+            screen = None
+            if panel is not None and hasattr(panel, "_screen"):
+                screen = panel._screen()
+            screen = screen or self.screen() or QtWidgets.QApplication.primaryScreen()
+            g = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1920, 1080)
+            self.setMaximumHeight(max(560, int(g.height() * 0.9)))   # 上限按目标屏重算
             hint = self._wrap.sizeHint()
-            self.resize(max(self.minimumWidth(), hint.width() + 20),
-                        min(hint.height() + 20, int(avail_h * 0.8)))
+            w = max(self.minimumWidth(), hint.width() + 20)
+            h = min(hint.height() + 20, int(g.height() * 0.8), self.maximumHeight())
+            self.resize(w, h)
+            # move() 摆的是**窗框**（原生标题栏在上面，实测 30px），而 geometry() 是客户区，
+            # 所以居中/夹取都得用窗框高，不然窗子会往下多探出标题栏那条。
+            fh = h + max(0, self.frameGeometry().height() - self.height())
+            self.move(min(max(g.left(), g.center().x() - w // 2), g.right() - w + 1),
+                      min(max(g.top(), g.center().y() - fh // 2), g.bottom() - fh + 1))
         self.setWindowOpacity(0.0)
         _anim(self, b"windowOpacity", 0.0, 1.0, DUR["fast"])
 

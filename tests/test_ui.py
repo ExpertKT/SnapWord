@@ -1076,45 +1076,137 @@ def test_b5_short_card_drag_height_gives_blank_not_a_dead_edge():
     c.close()
 
 
-def test_b5_wordbook_door_slides_out_from_behind_the_panel():
-    """记词板是"从常驻面板背后往左抽出来"，不是"从窗口外面滑进来"。
+def test_b5_wordbook_door_opens_like_a_hinged_reveal():
+    """记词板是"掀开"的，不是"整块滑出来"。
 
-    用户原话："弹出主界面是从左弹到右而不是从右弹到左"。旧实现的关闭位在窗口左缘外
-    （x=-WB_W），于是动画成了从左往右进入视野；现在的关闭位是 x=+WB_W（正被面板盖住），
-    所以第一帧必须在右边、全程不超过 WB_W，且滑过面板那一段里抽屉要在面板**下面**。
+    用户原话（先报"弹出反了"，再报"它是整块滑出来的，不像活板门"）：抽屉在窗口里的位置
+    **恒定**在 x=0，露多少由窗口 mask 决定；铰链在靠主面板那一侧（x=WB_W），所以"贴着
+    铰链的像素先能点、远端最后出现"——内容一动不动地被门缝照亮，这才是掀盖。
+    旧实现是 `wbpanel.pos()` 从 WB_W 滑到 0，整块跟着动，已被这条测试挡住不许回退。
     """
     cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
            "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
     d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None)
     d.show()
     wait(300)
-    if not d.expanded:                      # 抽屉要盖在面板上验 z 序，得先让面板在位
+    if not d.expanded:                      # 抽屉是挂在面板上的，面板得先在位
         d.toggle()
         wait(400)
-        assert d.expanded and d.panel.pos().x() == d.WB_W, "面板没展开，验不了'面板盖住抽屉'"
-    assert d.wbpanel.pos().x() == d.WB_W and not d.wbpanel.isVisible(), \
-        "关着的抽屉该停在面板正后方（x=%d）：%d" % (d.WB_W, d.wbpanel.pos().x())
+        assert d.expanded and d.panel.pos().x() == d.WB_W, "面板没展开，验不了记词板"
+    near = QtCore.QPoint(d.WB_W - 2, 150)   # 贴着铰链
+    far = QtCore.QPoint(10, 150)            # 离铰链最远
+    assert d.wbpanel.pos().x() == 0 and not d.wbpanel.isVisible(), \
+        "关着的抽屉也在 x=0（靠 mask 遮住），不该被挪到别处：%d" % d.wbpanel.pos().x()
+    assert d._wb_reveal == 0 and not d.mask().contains(far), "关着的时候还能点到记词板那块"
+
     d.toggle_wordbook()
-    xs, behind = [], False
+    xs, reveals, near_first, far_first = [], [], None, None
     end = time.monotonic() + 0.42
     while time.monotonic() < end:
         xs.append(d.wbpanel.pos().x())
-        if d.childAt(QtCore.QPoint(320, 150)) is d.panel:
-            behind = True
+        reveals.append(d._wb_reveal)
+        n, f = d.mask().contains(near), d.mask().contains(far)
+        if n and near_first is None:
+            near_first = len(xs)
+        if f and far_first is None:
+            far_first = len(xs)
         app().processEvents()
         time.sleep(0.01)
     wait(300)
-    assert xs and xs[0] >= d.WB_W - 40, \
-        "第一帧就在左边了（x=%s）—— 那不是从面板背后出来，是从窗口外面滑进来" % (xs[0] if xs else None)
-    assert all(x <= d.WB_W for x in xs), "中途跑到面板右边去了：%s" % xs[:6]
-    assert d.wbpanel.pos().x() == 0, "开完没停在 0：%d" % d.wbpanel.pos().x()
-    assert behind, "滑动过程中抽屉没被面板盖住（压在上面就是'盖着面板滑'）"
-    assert d.mask().contains(QtCore.QPoint(d.WB_W // 2, 5)), "开着的时候可点区里没有记词板"
-    d.toggle_wordbook()                                   # 关：该滑回面板背后
+    assert all(x == 0 for x in xs), "抽屉位置在动画里动了（=整块平移）：%s" % xs[:8]
+    assert max(reveals) > min(reveals), "露出宽度没变，那根本没动画：%s" % reveals[:6]
+    assert near_first is not None and far_first is not None and near_first <= far_first, \
+        "铰链侧没有比远端先亮（掀盖方向不对）：铰链 %s / 远端 %s" % (near_first, far_first)
+    assert abs(d._wb_reveal - d.WB_W) < 1 and d.wbpanel.isVisible(), \
+        "掀开后没露满：reveal=%s" % d._wb_reveal
+    assert d.mask().contains(near) and d.mask().contains(far), "掀开后可点区里没有整块记词板"
+
+    d.toggle_wordbook()                     # 关：该往铰链收回去
+    end = time.monotonic() + 0.42
+    far_gone_before_near = None
+    while time.monotonic() < end:
+        n, f = d.mask().contains(near), d.mask().contains(far)
+        if (not f) and n and far_gone_before_near is None:
+            far_gone_before_near = True
+        app().processEvents()
+        time.sleep(0.01)
     wait(500)
-    assert d.wbpanel.pos().x() == d.WB_W and not d.wbpanel.isVisible(), \
-        "关完没回到面板背后：%d" % d.wbpanel.pos().x()
-    assert not d.mask().contains(QtCore.QPoint(d.WB_W // 2, 5)), "关了还能点到记词板那块"
+    assert d._wb_reveal == 0 and not d.wbpanel.isVisible(), "关完没收回：%s" % d._wb_reveal
+    assert not d.mask().contains(far), "关了还能点到记词板那块"
+    assert far_gone_before_near, "关的时候远端不是先消失（关门方向不对）"
+    d.close()
+
+
+def test_b5_wordbook_copy_row_and_all():
+    """一键复制：每条一个 ⧉（复制那个词），底部一个「复制全部」（整板按行复制）。"""
+    import tempfile
+
+    from snapword import wordbook as _wb
+    book = _wb.Wordbook(os.path.join(tempfile.mkdtemp(prefix="swtest-"), "wb.db"))
+    for w in ("serendipity", "ephemeral"):
+        book.add({"query": w, "lexeme": w, "kind": "word", "cn": ["n. 测试"], "en": [], "ok": True})
+    cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
+           "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
+    d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None,
+                 wb=book)
+    d.show()
+    wait(200)
+    if not d.expanded:
+        d.toggle()
+        wait(400)
+    d.toggle_wordbook()
+    wait(500)
+
+    row = d.wb_v.itemAt(0).widget()
+    parts = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
+    assert len(parts) == 4 and [p.text() for p in parts][1:3] == ["⧉", "☆"], \
+        "每行该是 [词][⧉ 复制][★ 掌握][✕ 删除]：%s" % [p.text() for p in parts]
+    assert parts[1].toolTip() and "复制" in parts[1].toolTip(), "复制按钮没有说明"
+    assert d.btn_wb_copy.text() == "复制全部", "底部没有「复制全部」：%s" % d.btn_wb_copy.text()
+
+    words = [it["word"] for it in book.items()]
+    d._wb_copy_all()
+    assert d.lb_hint.text() == "已复制 %d 个词到剪贴板" % len(words), \
+        "复制全部没给反馈：%r" % d.lb_hint.text()
+    txt = QtWidgets.QApplication.clipboard().text()
+    if txt:          # 服务会话里 OpenClipboard 常失败、读不回来；读到了就顺手核对内容
+        assert txt.splitlines() == words, "复制全部的内容不对：%r" % txt
+
+    d._wb_copy(words[0], parts[1])
+    assert d.lb_hint.text() == "已复制：%s" % words[0], "单条复制没给反馈：%r" % d.lb_hint.text()
+    txt = QtWidgets.QApplication.clipboard().text()
+    if txt:
+        assert txt == words[0], "单条复制的内容不对：%r" % txt
+
+    # 空板：只提示，不许炸
+    book.clear()
+    d.refresh_wordbook()
+    d._wb_copy_all()
+    assert d.lb_hint.text() == "记词板还是空的", "空板复制该给提示：%r" % d.lb_hint.text()
+    d.close()
+
+
+def test_a2_settings_opens_centered_on_the_dock_screen():
+    """设置窗要居中在**常驻面板所在那块屏**上，而且整窗不许探出屏幕。
+
+    用户 m05212："设置界面出现的默认位置不对"，追加："上下拖非常不正常……极其灵敏并且
+    上下两边同时在动"。实测（tmp/dlg_probe.py）原来什么都不定位、交给 Windows 摆，它摆到
+    y=357，而窗子高 921 → 尾巴垂到屏幕外 126px，之后拖上下边系统一边重排一边缩就是这个手感。
+    """
+    cfg = {"hotkey": "ctrl+shift+D", "ocr_engine": "auto", "dock": {"enabled": True},
+           "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
+    d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None)
+    d.show()
+    wait(250)
+    s = gui.Settings(cfg, dock=d)
+    s.show()
+    wait(300)
+    g = d._screen().availableGeometry()
+    fg = s.frameGeometry()
+    assert g.contains(fg), "设置窗有一部分在屏幕外（拖上下边会和系统打架）：窗框 %s 屏 %s" % (fg, g)
+    assert abs(fg.center().y() - g.center().y()) <= 40, "没竖直居中：%s vs %s" % (fg, g)
+    assert abs(fg.center().x() - g.center().x()) <= 40, "没水平居中：%s vs %s" % (fg, g)
+    s.close()
     d.close()
 
 
