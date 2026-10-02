@@ -8,6 +8,7 @@
 """
 import html
 import io
+import math
 import os
 import re
 import sys
@@ -2198,61 +2199,92 @@ class Rail(QtWidgets.QFrame):
 
 
 class _WordbookFold(QtWidgets.QWidget):
-    """Paint a hinged, phone-like fold while the real panel stays interactive offscreen."""
+    """Render the panel hinge with motion-synced content softening."""
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self._pix = QtGui.QPixmap()
+        self._soft = QtGui.QPixmap()
         self._progress = 0.0
+        self._delta = 0.0
+        self._blur_strength = 0.0
 
     def start(self, pix, progress):
         w, h = self.parentWidget().WB_W, self.parentWidget().PANEL_H
-        # grab() may be device-pixel sized on high-DPI Windows. Normalize the
-        # snapshot to widget coordinates so the final frame joins pixel-for-pixel.
-        self._pix = pix.scaled(w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                               QtCore.Qt.TransformationMode.SmoothTransformation)
+        # QWidget.grab() can return device pixels on a scaled Windows display.
+        # Keep the preview in logical widget coordinates so its last frame is
+        # exactly the same size as the real panel.
+        image = pix.toImage()
+        if image.size() != QtCore.QSize(w, h):
+            image = image.scaled(w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                                 QtCore.Qt.TransformationMode.SmoothTransformation)
+        image.setDevicePixelRatio(1.0)
+        self._pix = QtGui.QPixmap.fromImage(image)
+        # Soften the actual screen content, not just the edge silhouette. Build
+        # it once per toggle rather than filtering a 300x300 image per frame.
+        low = image.scaled(max(1, w // 4), max(1, h // 4),
+                           QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                           QtCore.Qt.TransformationMode.SmoothTransformation)
+        self._soft = QtGui.QPixmap.fromImage(low.scaled(
+            w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation))
         self._progress = max(0.0, min(1.0, float(progress)))
+        self._delta = 0.0
+        self._blur_strength = 0.0
         self.setGeometry(0, 0, w, h)
         self.show()
         self.update()
 
     def set_progress(self, progress):
-        self._progress = max(0.0, min(1.0, float(progress)))
+        value = max(0.0, min(1.0, float(progress)))
+        self._delta = value - self._progress
+        self._progress = value
+        # Motion blur is strongest while the hinge is moving and fades naturally
+        # at both endpoints, where the live widget takes over pixel-for-pixel.
+        self._blur_strength = (min(1.0, abs(self._delta) * 24.0)
+                               * math.sin(math.pi * value) if 0.0 < value < 1.0 else 0.0)
         self.update()
+
+    def _draw_frame(self, painter, progress, pix, opacity=1.0):
+        w, h = self.width(), self.height()
+        if progress >= 1.0:
+            painter.setOpacity(opacity)
+            painter.drawPixmap(0, 0, pix)
+            painter.setOpacity(1.0)
+            return
+        if progress <= 0.0:
+            return
+        painter.setOpacity(opacity)
+        slices = 24
+        # Foreshortening is anchored at the right hinge; its distortion tends
+        # continuously to zero at full extension (no last-frame jump).
+        spread = progress ** 0.82
+        for i in range(slices):
+            u0, u1 = i / slices, (i + 1) / slices
+            src = QtCore.QRectF(u0 * w, 0, (u1 - u0) * w, h)
+            bend = 1.0 + 0.18 * (1.0 - progress)
+            d0 = (1.0 - u0) ** bend
+            d1 = (1.0 - u1) ** bend
+            x0 = w - w * d0 * spread
+            x1 = w - w * d1 * spread
+            dst = QtCore.QRectF(x0, 0, max(0.01, x1 - x0), h)
+            painter.drawPixmap(dst, pix, src)
+        painter.setOpacity(1.0)
 
     def paintEvent(self, _event):
         if self._pix.isNull() or self._progress <= 0.0:
             return
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        w, h = self.width(), self.height()
-        # A fan of narrow planes makes the hinge stay fixed while the outer edge
-        # folds out, instead of exposing a flat rectangular strip like a scroll.
-        slices = 18
-        for i in range(slices):
-            u0, u1 = i / slices, (i + 1) / slices
-            src = QtCore.QRectF(u0 * w, 0, (u1 - u0) * w, h)
-            # Project each source strip onto the plane rotating around its right edge.
-            # The outer edge advances faster; the stable hinge remains at x=w.
-            x0 = w - (1.0 - u0) * w * self._progress
-            x1 = w - (1.0 - u1) * w * self._progress
-            # A folded OLED panel also foreshortens vertically: the outer
-            # facets turn away from the viewer, then recover exactly at 1.0.
-            turn = 1.0 - self._progress
-            facet = 0.72 + 0.28 * (1.0 - u0) + 0.28 * self._progress
-            facet = max(0.08, min(1.0, facet))
-            dh = h * facet
-            dst = QtCore.QRectF(x0, (h - dh) * 0.5,
-                                max(0.5, x1 - x0), dh)
-            p.drawPixmap(dst, self._pix, src)
-            shade = int(turn * (62 + 28 * u0) + (1.0 - facet) * 20)
-            p.fillRect(dst, QtGui.QColor(0, 0, 0, shade))
-        # The hinge catches a narrow highlight/shadow, like a folding display seam.
-        seam = max(1, int(2 * self._progress))
-        p.fillRect(QtCore.QRectF(w - seam, 0, seam, h), QtGui.QColor(255, 255, 255, 28))
-        p.end()
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        # Paint the sharp frame first and soften the content on top. SourceOver
+        # preserves full opacity where both frames overlap (no grey wash).
+        self._draw_frame(painter, self._progress, self._pix)
+        if self._blur_strength > 0.01:
+            self._draw_frame(painter, self._progress, self._soft,
+                             min(0.88, self._blur_strength * 0.88))
+        painter.end()
 
 
 class Dock(QtWidgets.QWidget):
@@ -2455,9 +2487,8 @@ class Dock(QtWidgets.QWidget):
         """「活板门」：记词板是窗口最左边那一扇，打开是"掀开"，不是整块平移。
 
         为什么不是平移：抽屉原来从 x=WB_W 滑到 x=0（整块滑出来），用户报"不像活板门"。
-        现在抽屉**永远停在窗口内 x=0**，掀开的只是 mask 里属于它的那一条：可见宽度
-        0→WB_W，铰链在靠面板那一侧（抽屉的右边 x=WB_W），所以离铰链越远的像素出现得
-        越晚——内容本身一动不动，被"门缝"逐格照亮。这就是掀盖/翻门的手感。
+        抽屉始终在窗口内 x=0；动画时由铰链侧展开的预览层绘制折叠画面，
+        真实抽屉暂时隐藏，结束后恢复交互。窗口 mask 只在两个稳态切换。
         曲线 OutCubic（开）/ InCubic（关）：门是"荡开、收住"，不用过冲回弹。
         """
         previous = getattr(self, "_wb_anim", None)
@@ -2488,7 +2519,7 @@ class Dock(QtWidgets.QWidget):
                          else QtCore.QEasingCurve.Type.InCubic)
         a.valueChanged.connect(lambda v: self._set_wb_reveal(float(v)))
         a.finished.connect(self._settle)
-        self._wb_anim = a                        # 留引用：被 GC 掉门就停在半开
+        self._wb_anim = a                        # 留引用：被 GC 掉动画会停在半开
         a.start()
         self._save()
 
@@ -2751,6 +2782,7 @@ class Dock(QtWidgets.QWidget):
         self.wbpanel.setVisible(self.wb_open)
         if hasattr(self, "_wb_fold"):
             self._wb_fold.hide()
+            self._wb_fold.set_progress(1.0 if self.wb_open else 0.0)
         self._wb_reveal = float(self.WB_W if self.wb_open else 0)
         self._clip_wordbook()
         self._apply_mask()

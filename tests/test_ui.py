@@ -1082,17 +1082,56 @@ def test_b5_short_card_drag_height_gives_blank_not_a_dead_edge():
     c.close()
 
 
+def test_b5_wordbook_fold_blurs_content_without_endpoint_scale_jump():
+    app()
+    cfg = {"dock": {"enabled": True}, "providers": {}}
+    d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None)
+    d.show()
+    wait(50)
+    image = QtGui.QImage(375, 375, QtGui.QImage.Format.Format_ARGB32)
+    for x in range(image.width()):
+        color = QtGui.QColor("#ffffff" if (x // 15) % 2 else "#202020")
+        for y in range(image.height()):
+            image.setPixelColor(x, y, color)
+    pix = QtGui.QPixmap.fromImage(image)
+    pix.setDevicePixelRatio(1.25)
+    fold = d._wb_fold
+    fold.start(pix, 0.45)
+    assert fold._pix.size() == d.wbpanel.size()
+
+    def frame():
+        target = QtGui.QImage(d.WB_W, d.PANEL_H, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        target.fill(QtCore.Qt.GlobalColor.transparent)
+        fold.render(target)
+        return target
+
+    fold.set_progress(0.5)
+    moving = frame()
+    fold.set_progress(0.5)
+    sharp = frame()
+    assert fold._blur_strength == 0.0
+    assert any(moving.pixel(x, 150) != sharp.pixel(x, 150)
+               for x in range(30, d.WB_W - 30)), "虚化只改变了状态值，没有软化画面"
+    fold.set_progress(1.0)
+    endpoint = frame()
+    source = fold._pix.toImage()
+    assert fold._blur_strength == 0.0
+    assert all(endpoint.pixel(x, y) == source.pixel(x, y)
+               for x, y in ((0, 0), (40, 150), (150, 150), (299, 299))), \
+        "全开端点与原图像素不一致，交接时会跳"
+    d.close()
+
+
 def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     """记词板是"掀开"的，不是"整块滑出来"。
 
     用户原话（先报"弹出反了"，再报"它是整块滑出来的，不像活板门"）：抽屉在窗口里的位置
-    **恒定**在 x=0，露多少由**抽屉自己的 mask** 决定（`wbpanel.mask()`）；铰链在靠主面板
-    那一侧（x=WB_W），所以"贴着铰链的像素先能点、远端最后出现"——内容一动不动地被门缝照亮，
-    这才是掀盖。旧实现是 `wbpanel.pos()` 从 WB_W 滑到 0，整块跟着动，已被这条测试挡住不许回退。
+    **恒定**在 x=0；动画期间由折叠预览负责视觉过渡，结束后真实抽屉恢复交互并由**抽屉自己的 mask**决定最终可见区（`wbpanel.mask()`）。铰链在靠主面板
+    那一侧（x=WB_W），所以"贴着铰链的像素先能点、远端最后出现"。旧实现是 `wbpanel.pos()` 从 WB_W 滑到 0，整块跟着动，已被这条测试挡住不许回退。
 
-    **为什么裁子控件而不是窗口 mask**：窗口 mask 走 `SetWindowRgn`，逐帧放大 region 时分层
+    **为什么不逐帧裁窗口 mask**：窗口 mask 走 `SetWindowRgn`，逐帧放大 region 时分层
     窗口不一定重画新露出来的那条，用户实测就是"记词板直接消失、狂点只闪一小块"。所以窗口
-    mask 只按开/关两个稳态各设一次（这里断言它不会随动画逐帧变），动画只改子控件 mask。
+    mask 只按开/关两个稳态各设一次，动画由透明折叠预览绘制。
     """
     cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
            "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
@@ -1117,12 +1156,14 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
 
     d.toggle_wordbook()
     assert d._wb_fold.isVisible(), "掀门动画期间应显示折叠预览层"
-    xs, reveals, fold_progress, near_first, far_first, win_masks = [], [], [], None, None, []
+    xs, reveals, fold_progress, blur_values = [], [], [], []
+    near_first, far_first, win_masks = None, None, []
     end = time.monotonic() + 0.42
     while time.monotonic() < end:
         xs.append(d.wbpanel.pos().x())
         reveals.append(d._wb_reveal)
         fold_progress.append(d._wb_fold._progress)
+        blur_values.append(d._wb_fold._blur_strength)
         win_masks.append(d.mask().contains(near) and d.mask().contains(far))
         n, f = lit(near), lit(far)
         if n and near_first is None:
@@ -1135,6 +1176,10 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     assert all(x == 0 for x in xs), "抽屉位置在动画里动了（=整块平移）：%s" % xs[:8]
     assert max(reveals) > min(reveals), "露出宽度没变，那根本没动画：%s" % reveals[:6]
     assert max(fold_progress) > min(fold_progress), "折叠预览没有随动画展开"
+    assert max(blur_values) > 0.05, "动画期间没有产生运动虚化"
+    # The softened snapshot blends only during motion, never at rest.
+    assert d._wb_fold._blur_strength == 0.0, "稳态不应保留运动虚化"
+    assert d._wb_fold.size() == d.wbpanel.size(), "预览层与真实面板尺寸不一致"
     assert near_first is not None and far_first is not None and near_first <= far_first, \
         "铰链侧没有比远端先亮（掀盖方向不对）：铰链 %s / 远端 %s" % (near_first, far_first)
     assert all(win_masks), "窗口 mask 动画期间就在变（该只在开/关两个稳态各设一次）"
