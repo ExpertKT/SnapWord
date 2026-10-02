@@ -75,7 +75,7 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 按钮 hover/按下/聚焦 | 进入 90ms、离开 150ms（**不对称**：进入要即时，离开要柔和）；按下 50ms 下沉、松开 90ms 回弹 | `SmoothButton` 自绘（QSS 没有 transition，一帧硬切就是"简陋"的来源）：三个 0..1 过渡量 `hov/prs/foc` 走属性动画，每帧按量插值画底/边框/文字；按下时文字下移 1px |
 | 输入框/下拉框聚焦 | 150ms | `SmoothLineEdit` / `SmoothComboBox`：焦点蓝环是自绘叠层淡入，QSS 里**故意没有** `:focus` 规则（会打架） |
 | 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口宽度固定**（2026-10-03 起 = 记词板 300 + 面板宽 + 缝 6 + 细边 26，默认 652），只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
-| 记词板开 / 关 | 240ms，OutCubic / InCubic | 记词板是**掀盖（mask 揭示）**，不是整块滑。抽屉在窗口里的位置**恒定 `wbpanel.move(0,0)`**，动的是一个数：`Dock._wb_reveal`（0 = 全关，`WB_W` = 全开），`toggle_wordbook()` 用 `QVariantAnimation` 推它，`valueChanged → _set_wb_reveal()` 只做 `_apply_mask()`。`_apply_mask()` 里 **铰链在靠主面板那侧**（`x=WB_W`），露出的是 `[WB_W-r, WB_W)` 这一条 —— 所以贴着铰链的像素先能点、远端最后出现，内容一动不动地被门缝照亮。用户报过两轮：先是"从左弹到右而不是从右弹到左"（旧实现把关闭位放在屏幕左缘外了），再是"它是整块滑出来的，不像「活板门」"（旧实现是 `wbpanel.pos` 从 `WB_W` 滑到 0，整块跟着动）。开的时候要 `panel.raise_()/rail.raise_()/grip.raise_()`（`setVisible(True)` 会把抽屉顶到最上层，不压回去就成了"盖着面板滑"）。**不 resize 窗口**，理由同上 |
+| 记词板开 / 关 | 240ms，OutCubic / InCubic | 记词板是**掀盖（mask 揭示）**，不是整块滑。抽屉在窗口里的位置**恒定 `wbpanel.move(0,0)`**，动的是一个数：`Dock._wb_reveal`（0 = 全关，`WB_W` = 全开），`toggle_wordbook()` 用 `QVariantAnimation` 推它，`valueChanged → _set_wb_reveal()` 只调 `_clip_wordbook()`。`_clip_wordbook()` 把**抽屉自己的 mask** 裁成 `[WB_W-r, WB_W)`（`r=0` 时用一条落在控件外的 1px region = 全遮，**不能用空 `QRegion()`**：空 region 在 Qt 里是"没有 mask"= 整块可见）—— **铰链在靠主面板那侧**，所以贴着铰链的像素先能点、远端最后出现，内容一动不动地被门缝照亮。**窗口 mask 只在开/关两个稳态各设一次**（`_apply_mask()` 按 `wb_open` 算，不再逐帧改）：逐帧 `SetWindowRgn` 在分层窗口上会露出没重画的旧像素（用户实测"记词板直接消失、狂点只闪一小块"）。用户报过三轮：先是"从左弹到右而不是从右弹到左"（旧实现把关闭位放在屏幕左缘外了），再是"它是整块滑出来的，不像「活板门」"（旧实现是 `wbpanel.pos` 从 `WB_W` 滑到 0，整块跟着动），最后是上面那条逐帧窗口 mask。开的时候要 `panel.raise_()/rail.raise_()/grip.raise_()`（`setVisible(True)` 会把抽屉顶到最上层，不压回去就成了"盖着面板滑"）。**不 resize 窗口**，理由同上 |
 | 卡片改宽度 / 改高度 | 拖动中实时跟手（不跑动画） | 抓**四条 12px 透明子控件**（`Card.grip_l/grip_r` 宽 `GRIP_W=12`；`grip_t/grip_b` 高 `GRIP_H=12`，上下两条左右各让开 `GRIP_W`）触发，光标分别是 ↔ / ↕。宽度：`setFixedWidth` + 重排（`_fit_height`）。高度：**绝不能直接 `resize`**（外层布局一激活就按 sizeHint 顶回去，实测会被顶到 1100px）—— 正确路径是改那块滚动区（详解/聊天）的 `setFixedHeight`，再让 `_fit_height()` 重新量一遍；短卡没有可伸缩内容时，多出来的一截进 `_v_stretch` 弹簧（按钮行因此仍贴底边），`show_brief` 里复位。两者都**没有过渡动画**——动画会让被拖的边滞后于光标。**别改回按坐标判边**：卡片最外 8px 是投影留白，描边在 x=8，按坐标判（x≤6）用户按描边时事件落在 `frame` 上、进不了 `Card.mousePressEvent`，会变成"拖不动/在挪窗口" |
 | 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；**`_stagger_prepare()` 必须在 `show()` 之前把内容静态钉 0**，stagger **必须等 pos 动画 done 再启动**。少了 prepare 就是"卡片带全部文字滑进来（已经能读）→ 滑完一起变 0 → 再淡回来"，用户的原话是"弹出的动画头尾反了"（实测 t≈0-200ms 全 vis、t≈240ms 一起 0.00） |
 | 卡片关闭 | 150ms，InCubic | 向下 16px 滑出再 hide；**不走 windowOpacity 淡出**（同上，结尾会闪黑） |
@@ -111,10 +111,10 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | --- | --- |
 | 令牌 `T` / 时长 `DUR` | `gui.py` 顶部，`QSS = Template(...).substitute(T)` |
 | 投影 `_shadow(w)` | 只给 `Card.frame`（`outer` 留 8/8/8/12 的边距让它画出来）；**Dock 面板不加**——贴屏幕边会被切 |
-| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度**不变**（= 记词板区 + `_pan_w` + 缝 6 + 细边 26），只滑 panel；抽屉（wbpanel）**位置恒为 `(0,0)`**，开合只改 `Dock._wb_reveal` 再 `_apply_mask()`（铰链在 `x=WB_W`，见动效表"记词板开/关"）；`_settle()` 是唯一的收尾口（`_place(animate=False)` 也只调它）；rail 全程贴住窗口右缘（不能用 layout：窗口一变 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释）。可点区 = rail ∪ panel（展开时）∪ 露出的那一条 wbpanel（左边 300px 透明区必须始终裁掉，否则挡住底下的窗口）；抽屉必须比 panel/rail 低一层（`panel.raise_()` 三次调用见 `toggle_wordbook`） |
+| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度**不变**（= 记词板区 + `_pan_w` + 缝 6 + 细边 26），只滑 panel；抽屉（wbpanel）**位置恒为 `(0,0)`**，开合只改 `Dock._wb_reveal` → `_clip_wordbook()` 裁**子控件** mask（铰链在 `x=WB_W`，见动效表"记词板开/关"）；窗口 mask 由 `_apply_mask()` 只按开/关稳态设（`_settle()` 是唯一收尾口，`_place(animate=False)` 也只调它）；rail 全程贴住窗口右缘（不能用 layout：窗口一变 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释）。可点区 = rail ∪ panel（展开时）∪ 记词板那块（开着时；左边 300px 透明区关着时必须裁掉，否则挡住底下的窗口）；抽屉必须比 panel/rail 低一层（`panel.raise_()` 三次调用见 `toggle_wordbook`） |
 | 记词板（存词） | 词头 ☆/★ → `Card.save_requested` → `App._on_save` → `Wordbook.add/remove` → `Dock.refresh_wordbook()`；导出 md/csv 在 `Wordbook.export_*`，`Dock._wb_export` 只负责选路径。**一键复制**：每行 `⧉` → `Dock._wb_copy(word, btn)`，底行「复制全部」→ `Dock._wb_copy_all()`（`"\n".join(词)` 进剪贴板，空板只给提示不写剪贴板），两者都 `flash_success()` + `set_hint()` 回执 |
 | 面板宽度可拖 | `Dock.eventFilter` 里的 `self.grip` 分支（面板内侧 6px 抓边），夹在 `PANEL_W_MIN..PANEL_W_MAX`，松手 `_save()` 写回 `dock.panel_w` |
-| 卡片尺寸可拖 | `Card.eventFilter` 四条抓边分支 → `_begin_edge(edge, gpos)` / `_drag_width()` / `_drag_height()` / `_end_edge()`；宽度边界 360..min(屏宽×45%,720) 写回 `card_width`，高度边界 = 详解 96 / 聊天 110 .. 一块屏装得下（`_box_limit`）。`_end_edge` 拖矮过就把滚动区的 `maximumHeight` 还原成 `_scroll_cap`（否则以后每次详解都被压在那个小高度上） |
+| 卡片尺寸可拖 | `Card.eventFilter` 四条抓边分支 → `_begin_edge(edge, gpos)` / `_drag_width()` / `_drag_height()` / `_end_edge()`；宽度边界 360..min(屏宽×45%,720) 写回 `card_width`，高度边界 = 详解 96 / 聊天 110 .. 一块屏装得下（`_box_limit`）。**拖动量必须用"按下时记下的起点 + 绝对位移"**（`_drag_h` 里存 `box_h0` / 弹簧初始高）：`QSpacerItem.changeSize()` 会改写自己的 `sizeHint()`，拖动中再读它就是"已经长过的值"，每个 mouseMove 再加一遍位移 —— 真机上就是"拖一点直接起飞"（用户 2026-10-03 报）。`_end_edge` 拖矮过就把滚动区的 `maximumHeight` 还原成 `_scroll_cap`（否则以后每次详解都被压在那个小高度上） |
 | 卡片弹出 / 关闭 / 长高 | `Card.show_brief()` / `hide_card()+_really_hide()` / `_resize_keep_place()` |
 | 托盘菜单三项 | `Tray.attach_dock()`（显示常驻面板 / 展开收起 / 面板挂在哪块屏） |
 | 面板展开/收起 + 卡片动画 | `Dock._place()` + `_settle()` / `Card.show_brief()`、`_resize_keep_place()`；2026-09-28 起统一由 `tmp/ui_audit.py` 实跑断言（0 项未过） |
@@ -206,10 +206,19 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
   （`_box_floor`：详解 96 / 聊天 110），**不能读 `minimumHeight()`**（拖过一次之后它恒等于当前高度）。
 - **"活板门"不能靠挪控件实现**（2026-10-03）。第一版把抽屉的关闭位定在面板背后
   （`wbpanel.pos = WB_W`）、开合动画改 `pos`——用户看到的仍是"整块滑出来"。真正的
-  揭示要让**被揭示的内容一动不动**，露多少由窗口 `setMask()` 给：`Dock._wb_reveal` 0..WB_W
-  作为唯一变量，`_apply_mask()` 在**铰链侧**（靠面板那侧）长出 `[WB_W-r, WB_W)` 这一条。
+  揭示要让**被揭示的内容一动不动**，露多少由 mask 给：`Dock._wb_reveal` 0..WB_W
+  作为唯一变量，在**铰链侧**（靠面板那侧）长出 `[WB_W-r, WB_W)` 这一条。
   判据是"贴着铰链的像素先能点、远端最后出现"（`tmp/wb2_probe.py` 每 25ms 采 `mask().contains`）。
   同理，别用 `QVariantAnimation` 之外的东西记进度：直接把 `wbpanel.pos()` 当进度量，回不去。
+- **这个 mask 要裁在子控件上，不能逐帧裁窗口**（2026-10-03）。第二版把 `[WB_W-r, WB_W)`
+  放进窗口 `setMask()`、跟着动画逐帧改 —— 用户实测"记词板直接消失查无此人，狂点还能显示
+  一小块"（真机上 20 次/秒 `SetWindowRgn`，分层窗口不一定重画新露出来的那条）。现在
+  窗口 mask 只在开/关**两个稳态**各设一次，动画一律改 `wbpanel.setMask()`（纯 Qt 光栅化）
+  并 `wbpanel.update()`。**别指望在本机复现**：服务会话里没有真桌面合成器，逐帧窗口 mask
+  在这里"看着是对的"（`tmp/door2_probe.py` 用 Win32 `GetWindowRgn` 对过，Qt 的 mask 和
+  系统 region 完全对得上），所以这类反馈只能靠"换成不依赖窗口系统的实现"来收。
+  另外一个 Qt 语义坑：`setMask(QRegion())` 是**取消** mask（整块可见），要"全遮住"得给一条
+  落在控件外的 region（这里是 `QRegion(-1,-1,1,1)`）。
 - **`move()` 摆的是窗框，`geometry()/height()` 是客户区**（2026-10-03）。带原生边框的
   对话框上，标题栏在 dpr1.25 的屏上是 30px（实测 `frameGeometry=(717,100,613,951)` vs
   `geometry=(717,130,613,921)`，左右/下边框 0）。所以"居中/夹进可用屏"要用
@@ -221,6 +230,13 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
   向下的拖动被读成 -131 / -180，来回拖还会 ±96 振荡。要量就用自己造的 FakeEv，把**绝对全局
   坐标**喂给 `_begin_edge`/`_drag_height`（`tmp/h_probe.py` 就是这么量出 1:1 的）。
   同理，`childAt(点)` 才是"用户按的到底是哪个控件"的判据（QTest 不做命中测试，投给谁就发给谁）。
+- **拖动的"起点"要自己记，别读会被拖动改写的值**（2026-10-03）。`_drag_height` 里曾经写
+  `self._v_stretch.changeSize(0, sizeHint().height() + d, …)`——`changeSize()` 正是把
+  `sizeHint()` 改成新值的那一步，于是每个 mouseMove 都在"已经长过的值"上再加一遍位移：
+  单步探针量出来是漂亮的 1:1（`tmp/h_probe.py`），真机上用户拖一下就"起飞"。现在
+  `_begin_edge` 把起点存进 `_drag_h`（可伸缩区 `box_h0` / 弹簧初始高），`_drag_height`
+  一律 `起点 + 绝对位移`。**教训：验证拖动要分多步**（`tests/test_ui.py` 里那两条改成
+  循环发 10 次 mouseMove，不然一步到位永远测不出累积 bug）。
 - **有道查不到时会把原词原样回显**（2026-10-02）。`_brief_youdao` 拿到的 `explains` 可能
   就是查询词本身（实测 `zzqxyzzy` → `['zzqxyzzy']`）。那不是释义，拿它当结果就是
   "识别出来的解释是英文"，而且会按顺序把后面的百度翻译、本地 9B 初稿全挡住。

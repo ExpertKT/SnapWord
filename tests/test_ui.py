@@ -1041,9 +1041,10 @@ def test_b5_card_drag_height_absorbs_in_scroll_area():
     x, y0 = c.x() + 200, c.y() + h0 - 4
     c._begin_edge("bottom", QtCore.QPoint(x, y0))
     assert c._drag_h is not None, "按下底边没进入拖高度状态"
-    c._drag_height(_FakeEv(x, y0 + 120))
+    for i in range(1, 11):                        # 真实拖动是一串 mouseMove，别一步到位
+        c._drag_height(_FakeEv(x, y0 + 12 * i))
     assert abs(c.height() - (h0 + 120)) <= 24, \
-        "往下拖 120 卡片只变了 %d（该是 1:1）" % (c.height() - h0)
+        "分 10 步往下拖 120 卡片变 %d（该是 1:1）" % (c.height() - h0)
     assert abs(box.height() - (b0 + 120)) <= 24, "详解没跟着变：%d → %d" % (b0, box.height())
     assert c.height() < c.screen().availableGeometry().height(), "卡片被拖到比屏幕还高"
     c._end_edge()
@@ -1063,11 +1064,16 @@ def test_b5_short_card_drag_height_gives_blank_not_a_dead_edge():
     assert c._scroll_box() is None, "这张卡不该有可伸缩区"
     x, y0 = c.x() + 200, c.y() + h0 - 4
     c._begin_edge("bottom", QtCore.QPoint(x, y0))
-    c._drag_height(_FakeEv(x, y0 + 100))
-    assert abs(c.height() - (h0 + 100)) <= 24, "短卡拖不动：%d → %d" % (h0, c.height())
+    # **必须分多步拖**：真实拖动是一串 mouseMove。以前这里一步到位，漏掉了"每来一个
+    # mouseMove 就把位移再加一遍"的累积 bug（用户实测"拖一点直接起飞"）。
+    for i in range(1, 11):
+        c._drag_height(_FakeEv(x, y0 + 12 * i))
+    assert abs(c.height() - (h0 + 120)) <= 24, \
+        "分 10 步拖 120 卡片变 %d（该是 1:1，不是每步累加）" % (c.height() - h0)
     assert c.btn_close.mapTo(c, QtCore.QPoint(0, c.btn_close.height())).y() <= c.height() - 4, \
         "按钮行被挤出卡片了"
-    c._drag_height(_FakeEv(x, y0 - 400))          # 往回拖过头：只能收回到原高度
+    for i in range(1, 41):                        # 往回拖过头：只能收回到原高度
+        c._drag_height(_FakeEv(x, y0 - 10 * i))
     assert abs(c.height() - h0) <= 24, "空白收不回去：%d（该回到 %d）" % (c.height(), h0)
     c._end_edge()
     c.show_brief({"query": "y", "lexeme": "y", "kind": "word", "cn": ["释义"], "notes": []})
@@ -1080,9 +1086,13 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     """记词板是"掀开"的，不是"整块滑出来"。
 
     用户原话（先报"弹出反了"，再报"它是整块滑出来的，不像活板门"）：抽屉在窗口里的位置
-    **恒定**在 x=0，露多少由窗口 mask 决定；铰链在靠主面板那一侧（x=WB_W），所以"贴着
-    铰链的像素先能点、远端最后出现"——内容一动不动地被门缝照亮，这才是掀盖。
-    旧实现是 `wbpanel.pos()` 从 WB_W 滑到 0，整块跟着动，已被这条测试挡住不许回退。
+    **恒定**在 x=0，露多少由**抽屉自己的 mask** 决定（`wbpanel.mask()`）；铰链在靠主面板
+    那一侧（x=WB_W），所以"贴着铰链的像素先能点、远端最后出现"——内容一动不动地被门缝照亮，
+    这才是掀盖。旧实现是 `wbpanel.pos()` 从 WB_W 滑到 0，整块跟着动，已被这条测试挡住不许回退。
+
+    **为什么裁子控件而不是窗口 mask**：窗口 mask 走 `SetWindowRgn`，逐帧放大 region 时分层
+    窗口不一定重画新露出来的那条，用户实测就是"记词板直接消失、狂点只闪一小块"。所以窗口
+    mask 只按开/关两个稳态各设一次（这里断言它不会随动画逐帧变），动画只改子控件 mask。
     """
     cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
            "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
@@ -1095,17 +1105,24 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
         assert d.expanded and d.panel.pos().x() == d.WB_W, "面板没展开，验不了记词板"
     near = QtCore.QPoint(d.WB_W - 2, 150)   # 贴着铰链
     far = QtCore.QPoint(10, 150)            # 离铰链最远
+
+    def lit(pt):                            # 露出来了 = 子控件 mask 含它（空 mask = 无遮罩 = 全露）
+        m = d.wbpanel.mask()
+        return m.isEmpty() or m.contains(pt)
+
     assert d.wbpanel.pos().x() == 0 and not d.wbpanel.isVisible(), \
         "关着的抽屉也在 x=0（靠 mask 遮住），不该被挪到别处：%d" % d.wbpanel.pos().x()
-    assert d._wb_reveal == 0 and not d.mask().contains(far), "关着的时候还能点到记词板那块"
+    assert d._wb_reveal == 0 and not lit(far), "关着的时候还能看到记词板那块"
+    assert not d.mask().contains(far), "关着的时候窗口 mask 还留着记词板那块（会吃鼠标）"
 
     d.toggle_wordbook()
-    xs, reveals, near_first, far_first = [], [], None, None
+    xs, reveals, near_first, far_first, win_masks = [], [], None, None, []
     end = time.monotonic() + 0.42
     while time.monotonic() < end:
         xs.append(d.wbpanel.pos().x())
         reveals.append(d._wb_reveal)
-        n, f = d.mask().contains(near), d.mask().contains(far)
+        win_masks.append(d.mask().contains(near) and d.mask().contains(far))
+        n, f = lit(near), lit(far)
         if n and near_first is None:
             near_first = len(xs)
         if f and far_first is None:
@@ -1117,15 +1134,17 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     assert max(reveals) > min(reveals), "露出宽度没变，那根本没动画：%s" % reveals[:6]
     assert near_first is not None and far_first is not None and near_first <= far_first, \
         "铰链侧没有比远端先亮（掀盖方向不对）：铰链 %s / 远端 %s" % (near_first, far_first)
+    assert all(win_masks), "窗口 mask 动画期间就在变（该只在开/关两个稳态各设一次）"
     assert abs(d._wb_reveal - d.WB_W) < 1 and d.wbpanel.isVisible(), \
         "掀开后没露满：reveal=%s" % d._wb_reveal
-    assert d.mask().contains(near) and d.mask().contains(far), "掀开后可点区里没有整块记词板"
+    assert lit(near) and lit(far) and d.wbpanel.mask().isEmpty(), \
+        "掀开后该整块可见（子控件不该还留着 mask）"
 
     d.toggle_wordbook()                     # 关：该往铰链收回去
     end = time.monotonic() + 0.42
     far_gone_before_near = None
     while time.monotonic() < end:
-        n, f = d.mask().contains(near), d.mask().contains(far)
+        n, f = lit(near), lit(far)
         if (not f) and n and far_gone_before_near is None:
             far_gone_before_near = True
         app().processEvents()

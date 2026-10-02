@@ -1834,8 +1834,13 @@ class Card(QtWidgets.QWidget):
         # 上下边改高度：能伸缩的只有详解/聊天区（卡片其余部分高度都是内容说了算），
         # 所以拖动实质是"把这块滚动区拉大/压小"，卡片高度跟着它走（见 _drag_height）。
         box = self._scroll_box()
+        # 起点高度：可伸缩的那块（详解/聊天）没有时就是弹簧当前的占位高度。
+        # **必须在这里读一次存下来**：`QSpacerItem.changeSize()` 会把 sizeHint 改成新值，
+        # 拖动过程中再读 sizeHint() 拿到的是"已经长过的值"，每来一个 mouseMove 就再加一次
+        # 位移 —— 表现就是"拖一点直接起飞"（实测）。所以和 box 那条一样，用起点 + 绝对位移。
+        h_start = box.height() if box is not None else int(self._v_stretch.sizeHint().height())
         self._drag_h = (edge, gpos.y(), self.height(),
-                        box, box.height() if box is not None else 0,
+                        box, h_start,
                         self.y(), self.y() + self.height())
         self.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
 
@@ -1922,8 +1927,9 @@ class Card(QtWidgets.QWidget):
             # 短卡（还没点详解/问 AI）没有可伸缩的内容：拖出来的那一截就是空白，
             # 用下面的弹簧当占位 —— 用户明确要"拖上下边改高度"，默默不动会被当成没实现。
             # 空白落在按钮行上方（弹簧在按钮行前面），所以按钮还是贴着底边。
+            # 用 box_h0（拖动开始时的占位高）+ 绝对位移，**不能**用 sizeHint()+d（见 _begin_edge）。
             self._v_stretch.changeSize(
-                0, max(0, int(self._v_stretch.sizeHint().height()) + d),
+                0, max(0, box_h0 + d),
                 QtWidgets.QSizePolicy.Policy.Minimum,
                 QtWidgets.QSizePolicy.Policy.Expanding)
         else:
@@ -2403,6 +2409,9 @@ class Dock(QtWidgets.QWidget):
             self.panel.raise_()
             self.rail.raise_()
             self.grip.raise_()
+            # 窗口 mask 现在就切到"开着"的稳态（抽屉那块别再吃鼠标）；关的时候不急，
+            # 等 _settle() 收尾 —— 关门动画期间那块还得挡住鼠标。
+            self._apply_mask()
         _stop_anims(self.wbpanel, b"pos")       # 旧版留下过的位移动画：别让两层动画打架
         a = QtCore.QVariantAnimation(self)
         a.setStartValue(float(self._wb_reveal))
@@ -2418,7 +2427,26 @@ class Dock(QtWidgets.QWidget):
 
     def _set_wb_reveal(self, v):
         self._wb_reveal = v
-        self._apply_mask()
+        self._clip_wordbook()
+
+    def _clip_wordbook(self):
+        """把抽屉裁到"已掀开的那条"（`[WB_W-r, WB_W)`）。
+
+        **必须裁在子控件上，不能逐帧改窗口 mask**：窗口 mask 走 `SetWindowRgn`，而这窗口是
+        分层（`WA_TranslucentBackground`）窗口 —— 每帧把 region 放大时，Qt 并不一定跟着重画
+        新露出来的那条，屏幕上就是"记词板直接消失、只偶尔闪一小块"（用户实测）。子控件自己的
+        mask 由 Qt 光栅化器处理，改完顺手 `update()` 把露出来的那条重画，不牵扯窗口系统。
+        """
+        r = int(round(min(max(self._wb_reveal, 0.0), float(self.WB_W))))
+        if r <= 0:
+            # 空 QRegion = "没有 mask" = 整块可见，所以不能用 QRegion() 表示"全遮住"，
+            # 得给一条落在控件外面的一像素：可见区是 mask ∩ 控件，交集空 = 什么都看不见。
+            self.wbpanel.setMask(QtGui.QRegion(-1, -1, 1, 1))
+        elif r >= self.WB_W:
+            self.wbpanel.clearMask()
+        else:
+            self.wbpanel.setMask(QtGui.QRegion(self.WB_W - r, 0, r, self.PANEL_H))
+        self.wbpanel.update()
 
     def _wb_counts(self):
         if self.wb is None:
@@ -2653,6 +2681,7 @@ class Dock(QtWidgets.QWidget):
         self.wbpanel.move(0, 0)                 # 抽屉位置恒定，露多少由 mask 决定
         self.wbpanel.setVisible(self.wb_open)
         self._wb_reveal = float(self.WB_W if self.wb_open else 0)
+        self._clip_wordbook()
         self._apply_mask()
         # 抽屉永远压在面板之下（setVisible 之后 Qt 会重新排 z 序，所以这里每次都要重申）
         self.panel.raise_()
@@ -2662,16 +2691,18 @@ class Dock(QtWidgets.QWidget):
         self.raise_()
 
     def _apply_mask(self):
-        """可点/可画区域 = 细边 ∪ 主面板（展开时）∪ 已掀开的那条记词板。"""
+        """可点/可画区域 = 细边 ∪ 主面板（展开时）∪ 记词板占的那块（开着时）。
+
+        **只按稳态算**（开/关两个状态各一次），动画期间不再逐帧改窗口 mask：逐帧
+        `SetWindowRgn` 在分层窗口上会露出没重画的旧像素（见 `_clip_wordbook` 的注释）。
+        "露出多少"由 `_clip_wordbook()` 裁子控件负责。
+        """
         x0 = self.WB_W
-        x_rail = x0 + self._pan_w + 6
-        reg = QtGui.QRegion(x_rail, 0, self.RAIL_W, self.PANEL_H)
+        reg = QtGui.QRegion(x0 + self._pan_w + 6, 0, self.RAIL_W, self.PANEL_H)
         if self.expanded:
             reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
-        r = int(round(min(max(self._wb_reveal, 0.0), float(self.WB_W))))
-        if r > 0:
-            # 铰链在靠面板那一侧：露出来的是 [WB_W-r, WB_W) 这一条
-            reg = reg.united(QtGui.QRegion(x0 - r, 0, r, self.PANEL_H))
+        if self.wb_open:
+            reg = reg.united(QtGui.QRegion(0, 0, x0, self.PANEL_H))
         self.setMask(reg)
 
     def showEvent(self, ev):
