@@ -48,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File helper\build-ocr.ps1
 | --- | --- |
 | 不抢焦点 | 卡片是 `Qt.Tool + WA_ShowWithoutActivating`，`show()` 之后**不调用** `activateWindow()`；只有你自己点「问 AI」才把键盘交过去 |
 | 快 | 热键按下**先抓整屏**（所以遮罩不会拍到自己），词典结果直接在本地出（查一次 ~0.1 ms）；联网和 LLM 全在后台线程 |
-| 省 token | 结果按词进 `data\cache.db`，同一个词只查一次；DeepSeek 只在你点「详细解释」或按住 Shift 提问时才发 |
+| 省 token | 结果按词进 `data\cache.db`，同一个词只查一次；DeepSeek 只在你点「详解」或按住 Shift 提问时才发 |
 
 | 热键 | 作用 |
 | --- | --- |
@@ -287,7 +287,7 @@ DeepSeek 的 key 填了才会启用（`enabled` 自动跟着 key 走）。GUI �
 ## 已知限制
 
 - 多显示器：抓图只抓鼠标所在那一块屏。
-- `auto_detail` 默认关：详细解释要你点一下才生成，省钱。
+- `auto_detail` 默认关：详细解释（卡片上的「详解」）要你点一下才生成，省钱。
 - 崩了/卡片不出来：看 `data\snapword.log`。pythonw 启动时没有控制台，所以启动那行、
   未捕获异常、QThread 里的异常都写到那儿（启动器里已经装好这个钩子了）。
 - 词形还原是后缀规则拼的，不是词典反查；查不到原形时靠 9B 兜底。

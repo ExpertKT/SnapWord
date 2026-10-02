@@ -147,7 +147,7 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 超长详解 / 对话 | `detail` / `chat_log` 最大高度 = 可用屏高的 45%，超出自己滚 | `Card._build` |
 | 卡片比可用区域还高 | `_place` 里上下都夹在屏幕内，不给内容掉出屏幕的机会 | `Card._place` |
 | 表单太长 | 设置窗按"基本 / 屏幕识别 / 问答模型 / 进阶"分四组（轻量标题 `#sechead`，不加边框） | `Settings` |
-| 设置窗比屏幕还高 | 装进 `QScrollArea` + 高度夹在可用屏高的 90%；`QScrollArea` 的 sizeHint 不等于内容高，**首次显示要按内容量一次**（否则缩成一小块） | `Settings.showEvent` |
+| 设置窗比屏幕还高 | 装进 `QScrollArea` + 高度夹在可用屏高的 **80%**（2026-10-03 从 90% 收下来，理由见下一行）；`QScrollArea` 的 sizeHint 不等于内容高，**首次显示要按内容量一次**（否则缩成一小块） | `Settings.showEvent` |
 | 设置窗滚不动（2026-10-03 修） | 两个原因：①**保存/取消按钮在滚动区里面**，一滚就跟着走 —— 已挪到滚动区外当固定页脚（`outer.addWidget(foot)`）；②`showEvent` 按内容量一次高度时顶到 90% 上限，矮屏"刚好装下"、滚动条永远不出现 —— 改成夹 `min(内容高, 可用屏高*0.8)`，并 `setSizeGripEnabled(True)` 让用户还能自己缩；滚轮落在下拉框上会被 QComboBox 吃掉（有焦点时去改选项），用 `eventFilter` 转发给 `_scroll.viewport()` | `Settings.showEvent` / `Settings.eventFilter` |
 
 ## 引导块（onboarding，2026-09-29 定）
