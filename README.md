@@ -96,9 +96,24 @@ powershell -ExecutionPolicy Bypass -File helper\build-ocr.ps1
 python -m snapword.cli probe          :: OCR helper 通不通
 python -m snapword.cli ocr 图片.png    :: 只识别
 python -m snapword.cli look serendipity --detail
-python -m snapword.cli look running --no-net
+python -m snapword.cli running --no-net
 python -m snapword.cli ask serendipity "它和 luck 的区别？"
 ```
+
+### 攒词：☆ 存词 → 左侧记词板
+
+卡片词头右上角那个 **☆** 点一下就存进记词板（变 **★**，再点取消）。记词板平时收在主面板
+左边、**跟主面板一起滑**：展开主面板后点「记词板 · N」，它从窗口左缘**滑出来**（带一点过冲
+回弹的手感）；不开它的时候主面板的位置一个像素都不动。
+
+![记词板](docs/wordbook.png)
+
+- 点某一条 = 拿这个词**重新查一次**（还是走同一张卡片）
+- **★** = 标成「已掌握」，会沉到列表底部（不删，就是不碍眼）
+- **✕** 删单条；「清空」删全部（会先问一次）
+- 「导出」存成 Markdown 或 CSV（选后缀就行；CSV 带 BOM，Excel 打开不乱码）
+- 存在 `data\wordbook.db` 里 —— 跟查询缓存 `data\cache.db` **分开**：缓存可以随时删掉重来，
+  记词板是你自己攒的东西
 
 ## 目录
 
