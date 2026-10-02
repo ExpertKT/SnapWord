@@ -932,6 +932,7 @@ class Card(QtWidgets.QWidget):
     width_changed = QtCore.Signal(int)                 # 用户拖右边改了宽度（由 App 记进配置）
 
     GRIP_W = 12          # 左右抓边宽度（见 __init__：要盖住 x=8 那条可见描边）
+    GRIP_H = 12          # 上下抓边高度（盖住 y=8 / y=height-12 那两条可见描边）
 
     def __init__(self, font_pt=10, width=0):
         super().__init__(None)
@@ -952,7 +953,8 @@ class Card(QtWidgets.QWidget):
         self.brief = None
         self.pinned = False
         self._drag = None
-        self._drag_w = None             # 拖右边改宽度时的起点（见 mousePressEvent）
+        self._drag_w = None             # 拖左右边改宽度时的起点（见 _begin_edge）
+        self._drag_h = None             # 拖上下边改高度时的起点（见 _drag_height）
         self.saved = False              # 这个词在不在生词本里（决定「存词」按钮长什么样）
         self._jobs = []
         # 「生成中… N 秒」用：模型冷启动十几秒，只有一句「生成中…」用户分不清是在想还是已经死了
@@ -972,21 +974,34 @@ class Card(QtWidgets.QWidget):
         # 这也正是原来没任何提示的原因），按下后的隐式抓取又保证 move/release 都送给同一条边。
         self.grip_l = QtWidgets.QFrame(self, objectName="cardgrip")
         self.grip_r = QtWidgets.QFrame(self, objectName="cardgrip")
+        # 上下两条同理，只是改的是高度：见 _drag_height（差量交给详解/聊天区吸收）
+        self.grip_t = QtWidgets.QFrame(self, objectName="cardgrip")
+        self.grip_b = QtWidgets.QFrame(self, objectName="cardgrip")
         for g in (self.grip_l, self.grip_r):
             g.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
             g.setToolTip("拖动改卡片宽度")
             g.installEventFilter(self)
+        for g in (self.grip_t, self.grip_b):
+            g.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+            g.setToolTip("拖动改卡片高度")
+            g.installEventFilter(self)
         self._place_grips()
 
     def _place_grips(self):
-        """把两条抓边摆到可见描边上（卡片高度跟着内容走，所以每次 resize 都要重摆）。"""
+        """把四条抓边摆到可见描边上（卡片尺寸一变就得重摆，所以 resizeEvent 第一件事就是它）。
+
+        上下那两条左右各让开一个 GRIP_W：角上留给左右抓边（不重叠，省得纠结谁压谁）。
+        """
         if not getattr(self, "grip_l", None):
             return
-        h = self.height()
+        w, h = self.width(), self.height()
         self.grip_l.setGeometry(0, 0, self.GRIP_W, h)
-        self.grip_r.setGeometry(max(0, self.width() - self.GRIP_W), 0, self.GRIP_W, h)
-        self.grip_l.raise_()
-        self.grip_r.raise_()
+        self.grip_r.setGeometry(max(0, w - self.GRIP_W), 0, self.GRIP_W, h)
+        inner = max(0, w - 2 * self.GRIP_W)
+        self.grip_t.setGeometry(self.GRIP_W, 0, inner, self.GRIP_H)
+        self.grip_b.setGeometry(self.GRIP_W, max(0, h - self.GRIP_H), inner, self.GRIP_H)
+        for g in (self.grip_t, self.grip_b, self.grip_l, self.grip_r):
+            g.raise_()
 
     def _word_cap(self):
         """词头那一行给词留的最大宽度：卡宽 - 170（430 宽时正好是原来的 260）。"""
@@ -1116,6 +1131,7 @@ class Card(QtWidgets.QWidget):
         cap = max(150, int((scr_h - 420) / 2))
         self.detail.setMaximumHeight(cap)
         self.chat_log.setMaximumHeight(cap)
+        self._scroll_cap = cap       # 自然上限（用户手动拖过高度后，_end_edge 会用它还原）
 
         self.chat_row = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(self.chat_row)
@@ -1130,6 +1146,14 @@ class Card(QtWidgets.QWidget):
         h.addWidget(self.btn_esc)
         self.chat_row.hide()
         v.addWidget(self.chat_row)
+        # 手动把卡片拖高时（_drag_height），多出来的那一截如果没被详解/聊天区吃掉，
+        # 就落在这个弹簧里 —— 按钮行因此永远贴着底边，不会浮在卡片中间。
+        # 正常"高度跟内容走"的时候这一项是 0，没有任何影响。
+        # 注意 addStretch() 返回 None（Qt 里是 void），弹簧要自己造才拿得到句柄。
+        self._v_stretch = QtWidgets.QSpacerItem(
+            0, 0, QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Expanding)
+        v.addSpacerItem(self._v_stretch)
 
         # 按钮行用 FlowLayout（换行），不用 QHBoxLayout：卡片宽度可以拖（见 mousePressEvent），
         # 拖到 360 那档时这一行必须能换行而不是变形。文案也顺手收短：「详细解释」→「详解」。
@@ -1181,6 +1205,9 @@ class Card(QtWidgets.QWidget):
         self.chat_log.hide()
         self.chat_row.hide()
         self.chat_log.clear()
+        # 换个词就把上一次手动拖出来的空白收掉：高度回到"内容说了算"。
+        self._v_stretch.changeSize(0, 0, QtWidgets.QSizePolicy.Policy.Minimum,
+                                   QtWidgets.QSizePolicy.Policy.Expanding)
         # 换词了：先当作"没存过"，App 拿到生词本的真状态后会再校正一次（见 App._show_brief）。
         # 不这么做的话复用同一张卡片查第二个词，「已存」会挂在没存过的词上。
         self.set_saved(False)
@@ -1270,7 +1297,7 @@ class Card(QtWidgets.QWidget):
 
         不然用户看到的是：卡片带着全部文字滑进来（这一瞬间已经能读了），滑完这些文字
         一起"啪"地掉到透明、再一段段淡回来 —— 也就是"弹出的头（出现）和尾（淡入）反了"。
-        实测（tmp\edge_probe.py，430 的卡）：
+        实测（tmp/edge_probe.py，430 的卡）：
           t≈0-200ms 滑入，word/cn/en 都是 vis（内容全在）
           t≈240ms 滑完，三个一起变 0.00（整张卡一瞬空白）
           t≈280-500ms 才按 词头→释义→英文 依次淡回来
@@ -1789,45 +1816,82 @@ class Card(QtWidgets.QWidget):
             return
         self._after_grow()                    # 长高动画收尾 → 揭示淡入（绝不与几何动画重叠）
 
-    # 拖标题栏移动 / 拖左右边改宽度
+    # 拖卡片本体挪位置 / 拖四条边改尺寸
     #
-    # 宽度那一档的判定：卡片最外面 8px 是 outer 的边距（frame 在里面），鼠标落在那里时
-    # 落点是 Card 自己、不是 frame 里的子控件，所以 press 能收到 —— 离左右边 ≤6px 就算抓边。
+    # 四条边的判定都在抓边子控件里（见 __init__：最外 8px 是投影留白、可见描边在 x=8，
+    # 按坐标判边的话事件会落在 frame 上，变成"挪窗口"—— 这就是用户说的"拖大小没实现"）。
     def _begin_edge(self, edge, gpos):
-        """开始拖宽度。事件来自哪条抓边由调用方判定（见 __init__ 里为什么要做成子控件）。"""
+        """开始拖某条边。事件来自哪条抓边由调用方判定（见 __init__ 里为什么要做成子控件）。"""
         if edge == "right":
             self._drag_w = (self.width(), gpos.x())
-        else:
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            return
+        if edge == "left":
             # 左边拖动：窗口的右上角钉住不动（宽度变了多少，x 就往回退多少）
             self._drag_w = ("left", self.width(), gpos.x(), self.x() + self.width())
-        self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            return
+        # 上下边改高度：能伸缩的只有详解/聊天区（卡片其余部分高度都是内容说了算），
+        # 所以拖动实质是"把这块滚动区拉大/压小"，卡片高度跟着它走（见 _drag_height）。
+        box = self._scroll_box()
+        self._drag_h = (edge, gpos.y(), self.height(),
+                        box, box.height() if box is not None else 0,
+                        self.y(), self.y() + self.height())
+        self.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+
+    def _scroll_box(self):
+        """当前可见的那块可伸缩长内容（详解优先，其次聊天区）。都没有就没得缩放。"""
+        for box in (self.detail, self.chat_log):
+            if box.isVisible():
+                return box
+        return None
+
+    def _box_floor(self, box):
+        """详解/聊天区各自的设计下限（setFixedHeight 会把 minimumHeight 一起抬上去，
+        所以不能拿它当"还能缩多少"的依据，见 _drag_height 的算法）。"""
+        return 96 if box is self.detail else 110
 
     def _end_edge(self):
+        was_width = self._drag_w is not None
+        box = self._drag_h[3] if self._drag_h is not None else None
         self._drag_w = None
+        self._drag_h = None
         self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
-        self.width_changed.emit(int(self.width()))
+        # 拖高时把这块滚动区的 maximumHeight 一起抬了（否则它撑不到用户要的高度）；
+        # 拖矮的情况再把它还原成自然上限 —— 不然用户往小拖一次，以后每次详解都被压在
+        # 那个小高度上（set_detail 是拿 maximumHeight() 当上限用的，见 gui.py:1423）。
+        if box is not None:
+            box.setMinimumHeight(self._box_floor(box))
+            if box.height() <= getattr(self, "_scroll_cap", 0):
+                box.setMaximumHeight(self._scroll_cap)
+        if was_width:
+            self.width_changed.emit(int(self.width()))
 
     def eventFilter(self, obj, ev):
-        # 两条抓边上的鼠标事件全由这里接管：抓边走的是子控件，Card.mousePressEvent 收不到。
-        if obj is self.grip_l or obj is self.grip_r:
-            edge = "left" if obj is self.grip_l else "right"
+        # 四条抓边上的鼠标事件全由这里接管：抓边走的是子控件，Card.mousePressEvent 收不到。
+        edges = {self.grip_l: "left", self.grip_r: "right",
+                 self.grip_t: "top", self.grip_b: "bottom"}
+        if obj in edges:
             t = ev.type()
             if t == QtCore.QEvent.Type.MouseButtonPress:
                 if ev.button() == QtCore.Qt.MouseButton.LeftButton:
-                    self._begin_edge(edge, ev.globalPosition().toPoint())
+                    self._begin_edge(edges[obj], ev.globalPosition().toPoint())
                     return True
             elif t == QtCore.QEvent.Type.MouseMove:
                 if self._drag_w is not None:
                     self._drag_width(ev)
                     return True
+                if self._drag_h is not None:
+                    self._drag_height(ev)
+                    return True
             elif t == QtCore.QEvent.Type.MouseButtonRelease:
-                if self._drag_w is not None:
+                if self._drag_w is not None or self._drag_h is not None:
                     self._end_edge()
                     return True
         return super().eventFilter(obj, ev)
 
     def mousePressEvent(self, e):
-        # 左右两边都由抓边接管了，这里只剩"拖卡片本体挪位置"（顶/底那两条留白）。
+        # 四条边都由抓边接管了，这里只剩"拖卡片本体挪位置"。
         if e.button() != QtCore.Qt.MouseButton.LeftButton:
             return
         self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -1836,8 +1900,51 @@ class Card(QtWidgets.QWidget):
         if self._drag_w is not None:
             self._drag_width(e)
             return
+        if self._drag_h is not None:
+            self._drag_height(e)
+            return
         if self._drag is not None:
             self.move(e.globalPosition().toPoint() - self._drag)
+
+    def _drag_height(self, e):
+        """拖上下边改高度：鼠标动的这一截全部转给当前可见的详解/聊天区，
+        然后让**既有的"高度跟内容走"**（_fit_height）算出新高度 —— 不自己 resize 窗口。
+
+        为什么要绕这一圈：卡片高度不是独立变量，窗口永远要严丝合缝地等于内容需要的高度
+        （外层布局一被激活就会把窗口拉回 sizeHint，实测手动 resize 出来的高度会被
+        1100px 那种离奇值顶掉）。所以"改高度"的正确做法是改那块滚动区的高度，
+        再让 _fit_height 重新量一遍。详解/聊天区都带滚动条，拉高看更多、压矮留更多屏幕。
+        """
+        edge, y0, h0, box, box_h0, top0, bot0 = self._drag_h
+        gy = e.globalPosition().toPoint().y()
+        d = (gy - y0) if edge == "bottom" else (y0 - gy)      # 往下拖 = 变高
+        if box is None:
+            # 短卡（还没点详解/问 AI）没有可伸缩的内容：拖出来的那一截就是空白，
+            # 用下面的弹簧当占位 —— 用户明确要"拖上下边改高度"，默默不动会被当成没实现。
+            # 空白落在按钮行上方（弹簧在按钮行前面），所以按钮还是贴着底边。
+            self._v_stretch.changeSize(
+                0, max(0, int(self._v_stretch.sizeHint().height()) + d),
+                QtWidgets.QSizePolicy.Policy.Minimum,
+                QtWidgets.QSizePolicy.Policy.Expanding)
+        else:
+            box_h = int(max(self._box_floor(box),
+                            min(box_h0 + d, self._box_limit(h0, box_h0))))
+            if box_h != box.height():
+                box.setFixedHeight(box_h)
+        self._resizing = False              # 手动拖的时候"长高动画"的闸门必须是关的
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        h = int(self._fit_height())
+        self.setFixedHeight(h)
+        top = top0 if edge == "bottom" else bot0 - h
+        self.move(*self._clamp_pos(h, self.x(), top))
+
+    def _box_limit(self, h0, box_h0):
+        """这块滚动区最多能长多高：整块屏装得下卡片（卡片里除了它的那部分高度不变）。"""
+        scr = (QtWidgets.QApplication.screenAt(self.pos())
+               or QtWidgets.QApplication.primaryScreen())
+        gh = scr.availableGeometry().height() if scr is not None else 1080
+        return box_h0 + max(0, gh - 16 - h0)
 
     def _drag_width(self, e):
         gx = e.globalPosition().toPoint().x()
@@ -2255,6 +2362,13 @@ class Dock(QtWidgets.QWidget):
         wbrow.addWidget(self.btn_wb_export, 1)
         wbrow.addWidget(self.btn_wb_clear, 1)
         wv.addLayout(wbrow)
+        # 关着的抽屉停在 x=WB_W（面板正后方，看不见）；_place() 会按 wb_open 摆一次
+        self.wbpanel.move(self.WB_W, 0)
+        self.wbpanel.setVisible(self.wb_open)
+        # 记词板是"从面板背后抽出来的抽屉"：关着的时候它就停在面板正后方（同一个 x），
+        # 所以面板必须压在它上面 —— 这条 raise_ 是那扇门的"门框"。
+        self.panel.raise_()
+        self.rail.raise_()
         self.grip.raise_()          # 抓条要在面板内容之上才收得到鼠标
         self.refresh_wordbook()
 
@@ -2263,18 +2377,30 @@ class Dock(QtWidgets.QWidget):
 
     # ---------- 记词板 ----------
     def toggle_wordbook(self):
-        """开/关那扇"活板门"。曲线用 OutBack：抽屉抽出来时"过冲一点点再回弹"，
-        这一下就是"活板门"的手感（主面板用的是 OutQuint，收得住不弹）。"""
+        """"活板门"：记词板是压在主面板**背后**的抽屉，从面板下面往左抽出来。
+
+        方向和手感：关闭位在窗口内 x=WB_W（正好被主面板盖住，看不见），打开位 x=0。
+        于是动画是 x 由大到小 —— **从右往左滑出来**（旧版是从窗口左边缘 x=-WB_W 滑到 0，
+        也就是从左往右，用户报的"弹反了"就是这个；窗口左侧本来就是透明的，
+        从那边进场看起来像从屏幕外飞进来，而不是从面板里抽出来）。
+        曲线用 OutBack：抽出来时过冲一点点再回弹，这一下就是"活板门"的手感。
+        """
         self.wb_open = not self.wb_open
         self.refresh_wordbook()
+        hidden = QtCore.QPoint(self.WB_W, 0)
         if self.wb_open:
-            self.clearMask()             # 动画期间整窗可画（mask 会把滑动中的面板裁掉）
+            self.clearMask()             # 动画期间整窗可画（mask 会把滑动中的抽屉裁掉）
             self.wbpanel.setVisible(True)
-            self.wbpanel.move(-self.WB_W, 0)
-            _anim(self.wbpanel, b"pos", QtCore.QPoint(-self.WB_W, 0), QtCore.QPoint(0, 0),
+            # setVisible(True) 会把抽屉顶到最上层，而它必须**在面板下面**（不然看起来是
+            # 盖着面板滑，而不是从面板背后抽出来）。所以每次露头都重新压回面板之下。
+            self.panel.raise_()
+            self.rail.raise_()
+            self.grip.raise_()
+            self.wbpanel.move(hidden)
+            _anim(self.wbpanel, b"pos", hidden, QtCore.QPoint(0, 0),
                   DUR["base"], curve=QtCore.QEasingCurve.Type.OutBack, done=self._settle)
         else:
-            _anim(self.wbpanel, b"pos", self.wbpanel.pos(), QtCore.QPoint(-self.WB_W, 0),
+            _anim(self.wbpanel, b"pos", self.wbpanel.pos(), hidden,
                   DUR["base"], curve=QtCore.QEasingCurve.Type.InCubic, done=self._settle)
         self._save()
 
@@ -2389,7 +2515,7 @@ class Dock(QtWidgets.QWidget):
             # 主面板收回去时记词板一起收：那扇门本来就没有"自己单独开着"的样子
             # （它的开关按钮在主面板里，展开时才有）。
             self.wb_open = False
-            self.wbpanel.move(-self.WB_W, 0)
+            self.wbpanel.move(self.WB_W, 0)
             self.wbpanel.setVisible(False)
         self._apply(animate=True)
         if self.expanded:
@@ -2434,8 +2560,8 @@ class Dock(QtWidgets.QWidget):
         y = g.y() + (g.height() - h) // 2 if self._y is None else int(self._y)
         y = min(max(g.y(), y), max(g.y(), g.y() + g.height() - h))
         # 右边缘永远是屏幕右边缘（EDGE_GAP=0）。窗口宽度只随面板宽度变，展开/收起只滑
-        # panel，不改窗口尺寸。**记词板是从左边滑出来的**：窗口一开始就有它的位置，
-        # 所以开关记词板不动主面板一个像素。
+        # panel，不改窗口尺寸。**记词板是主面板背后那层抽屉**：窗口一开始就有它的位置，
+        # 关着时它停在 x=WB_W（面板正后方，被面板盖住），所以开不开记词板主面板一个像素都不动。
         # 旧实现是窗口 26↔352 地 resize，它一口气带来两个用户能看到的毛病：
         # 1) Windows 对半透明窗口 resize，会先拿旧 buffer **拉伸**显示一帧 —— rail 是不透明
         #    的，那帧被拉长的 rail 就画出来了（新增的 326px 在窗口左侧），用户看到的就是
@@ -2453,7 +2579,7 @@ class Dock(QtWidgets.QWidget):
         if not animate:
             self.panel.move(x0 if self.expanded else x_hidden, 0)
             self.panel.setVisible(self.expanded)
-            self.wbpanel.move(0 if self.wb_open else -self.WB_W, 0)
+            self.wbpanel.move(0 if self.wb_open else self.WB_W, 0)
             self.wbpanel.setVisible(self.wb_open)
             self._settle()
             return
@@ -2483,14 +2609,18 @@ class Dock(QtWidgets.QWidget):
         self.panel.setVisible(self.expanded)
         self.panel.move(x0 if self.expanded else x0 + self._pan_w + self.RAIL_W, 0)
         self.wbpanel.setVisible(self.wb_open)
-        self.wbpanel.move(0 if self.wb_open else -self.WB_W, 0)
+        self.wbpanel.move(0 if self.wb_open else self.WB_W, 0)
         reg = QtGui.QRegion(x_rail, 0, self.RAIL_W, self.PANEL_H)
         if self.expanded:
             reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
         if self.wb_open:
             reg = reg.united(QtGui.QRegion(0, 0, self.WB_W, self.PANEL_H))
         self.setMask(reg)
+        # 抽屉永远压在面板之下（setVisible 之后 Qt 会重新排 z 序，所以这里每次都要重申）
+        self.panel.raise_()
+        self.rail.raise_()
         self.grip.setGeometry(0, 0, 6, self.PANEL_H)
+        self.grip.raise_()
         self.raise_()
 
     def showEvent(self, ev):

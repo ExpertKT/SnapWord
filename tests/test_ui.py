@@ -1009,6 +1009,115 @@ def test_b5_menu_and_dialog_animation():
     assert not s.isVisible() and s.result() == 1, "设置窗没关干净"
 
 
+class _FakeEv:
+    """只带 globalPosition() 的假鼠标事件（`_drag_width`/`_drag_height` 只读这一个方法）。
+
+    用它而不是 QTest：`_drag_height` 会移动窗口，而 QTest 把 local 映射成 global 时
+    跟着那个移动漂（实测同一个向下拖动被读成 -131）—— 见 UI-STYLE.md 坑清单。
+    """
+
+    def __init__(self, x, y):
+        self._p = QtCore.QPointF(float(x), float(y))
+
+    def globalPosition(self):
+        return self._p
+
+
+def test_b5_card_drag_height_absorbs_in_scroll_area():
+    """拖卡片上下边 = 改那块滚动区（详解/聊天）的高度，卡片高度跟着走，**不是**直接 resize 窗口。
+
+    直接 `resize` 会被外层布局在激活时按 sizeHint 顶回去（实测想设 672、量出来 1100），
+    所以正确路径是改滚动区高度再让 `_fit_height()` 重新量。这里钉三件事：
+    (1) 鼠标位移和卡片高度接近 1:1；(2) 卡片不会被拖到比屏幕还高；
+    (3) 松手后滚动区的下限被还原（不还原的话用户往小拖过一次，以后每次详解都被压在那个高度上）。
+    """
+    c = card_of()
+    wait(900)
+    c.set_detail("详解 " * 120)
+    wait(700)
+    h0, box = c.height(), c._scroll_box()
+    assert box is c.detail and box.isVisible(), "带详解的卡应该拿详解当可伸缩区"
+    b0 = box.height()
+    x, y0 = c.x() + 200, c.y() + h0 - 4
+    c._begin_edge("bottom", QtCore.QPoint(x, y0))
+    assert c._drag_h is not None, "按下底边没进入拖高度状态"
+    c._drag_height(_FakeEv(x, y0 + 120))
+    assert abs(c.height() - (h0 + 120)) <= 24, \
+        "往下拖 120 卡片只变了 %d（该是 1:1）" % (c.height() - h0)
+    assert abs(box.height() - (b0 + 120)) <= 24, "详解没跟着变：%d → %d" % (b0, box.height())
+    assert c.height() < c.screen().availableGeometry().height(), "卡片被拖到比屏幕还高"
+    c._end_edge()
+    assert box.minimumHeight() == c._box_floor(box), \
+        "松手后详解的下限没还原（%d）—— 以后每次详解都会被压在这个高度上" % box.minimumHeight()
+    c.close()
+
+
+def test_b5_short_card_drag_height_gives_blank_not_a_dead_edge():
+    """短卡（还没点详解/问 AI）拖上下边也该有反应：多出来的一截是空白，按钮行仍然贴着底边。
+
+    没有可伸缩内容时静默不动会被当成"还是没实现"（用户第二次反馈就是这个口气）。
+    """
+    c = card_of()
+    wait(900)
+    h0 = c.height()
+    assert c._scroll_box() is None, "这张卡不该有可伸缩区"
+    x, y0 = c.x() + 200, c.y() + h0 - 4
+    c._begin_edge("bottom", QtCore.QPoint(x, y0))
+    c._drag_height(_FakeEv(x, y0 + 100))
+    assert abs(c.height() - (h0 + 100)) <= 24, "短卡拖不动：%d → %d" % (h0, c.height())
+    assert c.btn_close.mapTo(c, QtCore.QPoint(0, c.btn_close.height())).y() <= c.height() - 4, \
+        "按钮行被挤出卡片了"
+    c._drag_height(_FakeEv(x, y0 - 400))          # 往回拖过头：只能收回到原高度
+    assert abs(c.height() - h0) <= 24, "空白收不回去：%d（该回到 %d）" % (c.height(), h0)
+    c._end_edge()
+    c.show_brief({"query": "y", "lexeme": "y", "kind": "word", "cn": ["释义"], "notes": []})
+    wait(300)
+    assert abs(c.height() - h0) <= 24, "换词后拖出来的空白没收掉：%d（该回到 %d）" % (c.height(), h0)
+    c.close()
+
+
+def test_b5_wordbook_door_slides_out_from_behind_the_panel():
+    """记词板是"从常驻面板背后往左抽出来"，不是"从窗口外面滑进来"。
+
+    用户原话："弹出主界面是从左弹到右而不是从右弹到左"。旧实现的关闭位在窗口左缘外
+    （x=-WB_W），于是动画成了从左往右进入视野；现在的关闭位是 x=+WB_W（正被面板盖住），
+    所以第一帧必须在右边、全程不超过 WB_W，且滑过面板那一段里抽屉要在面板**下面**。
+    """
+    cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
+           "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
+    d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None)
+    d.show()
+    wait(300)
+    if not d.expanded:                      # 抽屉要盖在面板上验 z 序，得先让面板在位
+        d.toggle()
+        wait(400)
+        assert d.expanded and d.panel.pos().x() == d.WB_W, "面板没展开，验不了'面板盖住抽屉'"
+    assert d.wbpanel.pos().x() == d.WB_W and not d.wbpanel.isVisible(), \
+        "关着的抽屉该停在面板正后方（x=%d）：%d" % (d.WB_W, d.wbpanel.pos().x())
+    d.toggle_wordbook()
+    xs, behind = [], False
+    end = time.monotonic() + 0.42
+    while time.monotonic() < end:
+        xs.append(d.wbpanel.pos().x())
+        if d.childAt(QtCore.QPoint(320, 150)) is d.panel:
+            behind = True
+        app().processEvents()
+        time.sleep(0.01)
+    wait(300)
+    assert xs and xs[0] >= d.WB_W - 40, \
+        "第一帧就在左边了（x=%s）—— 那不是从面板背后出来，是从窗口外面滑进来" % (xs[0] if xs else None)
+    assert all(x <= d.WB_W for x in xs), "中途跑到面板右边去了：%s" % xs[:6]
+    assert d.wbpanel.pos().x() == 0, "开完没停在 0：%d" % d.wbpanel.pos().x()
+    assert behind, "滑动过程中抽屉没被面板盖住（压在上面就是'盖着面板滑'）"
+    assert d.mask().contains(QtCore.QPoint(d.WB_W // 2, 5)), "开着的时候可点区里没有记词板"
+    d.toggle_wordbook()                                   # 关：该滑回面板背后
+    wait(500)
+    assert d.wbpanel.pos().x() == d.WB_W and not d.wbpanel.isVisible(), \
+        "关完没回到面板背后：%d" % d.wbpanel.pos().x()
+    assert not d.mask().contains(QtCore.QPoint(d.WB_W // 2, 5)), "关了还能点到记词板那块"
+    d.close()
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items())
          if n.startswith("test_") and callable(f)]
 

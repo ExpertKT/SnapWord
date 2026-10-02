@@ -75,8 +75,8 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 按钮 hover/按下/聚焦 | 进入 90ms、离开 150ms（**不对称**：进入要即时，离开要柔和）；按下 50ms 下沉、松开 90ms 回弹 | `SmoothButton` 自绘（QSS 没有 transition，一帧硬切就是"简陋"的来源）：三个 0..1 过渡量 `hov/prs/foc` 走属性动画，每帧按量插值画底/边框/文字；按下时文字下移 1px |
 | 输入框/下拉框聚焦 | 150ms | `SmoothLineEdit` / `SmoothComboBox`：焦点蓝环是自绘叠层淡入，QSS 里**故意没有** `:focus` 规则（会打架） |
 | 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口宽度固定**（2026-10-03 起 = 记词板 300 + 面板宽 + 缝 6 + 细边 26，默认 652），只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
-| 记词板开 / 关 | 240ms，OutBack / InCubic | 记词板挂在面板**左侧同一窗口**里，从窗口左缘外 `x=-WB_W` 滑进来（OutBack 的过冲回弹就是"活板门"的手感）。**不 resize 窗口**，理由同上 |
-| 卡片改宽度 | 拖动中实时跟手（不跑动画） | 抓左右**两条 12px 透明子控件**（`Card.grip_l/grip_r`，压在可见描边上、`GRIP_W=12`）触发：只改 `setFixedWidth` + 重排（`_fit_height`），**没有过渡动画**——动画会让被拖的边滞后于光标。**别改回按 x 坐标判边**：卡片最外 8px 是投影留白，描边在 x=8，按坐标判（x≤6）用户按描边时事件落在 `frame` 上、进不了 `Card.mousePressEvent`，会变成"拖不动/在挪窗口" |
+| 记词板开 / 关 | 240ms，OutBack / InCubic | 记词板挂在面板**左侧同一窗口**里，**关闭位是 `x=WB_W`（=300，正好被 panel 盖住）、开启位是 `x=0`** —— 视觉上就是"从常驻面板背后往左抽出来"（OutBack 的过冲回弹就是"活板门"的手感）。**不能停在屏幕左缘外**：那样动画是从左往右进入视野，用户的原话是"从左弹到右而不是从右弹到左"。开的时候要 `panel.raise_()/rail.raise_()/grip.raise_()`（`setVisible(True)` 会把抽屉顶到最上层，不压回去就成了"盖着面板滑"）。**不 resize 窗口**，理由同上 |
+| 卡片改宽度 / 改高度 | 拖动中实时跟手（不跑动画） | 抓**四条 12px 透明子控件**（`Card.grip_l/grip_r` 宽 `GRIP_W=12`；`grip_t/grip_b` 高 `GRIP_H=12`，上下两条左右各让开 `GRIP_W`）触发，光标分别是 ↔ / ↕。宽度：`setFixedWidth` + 重排（`_fit_height`）。高度：**绝不能直接 `resize`**（外层布局一激活就按 sizeHint 顶回去，实测会被顶到 1100px）—— 正确路径是改那块滚动区（详解/聊天）的 `setFixedHeight`，再让 `_fit_height()` 重新量一遍；短卡没有可伸缩内容时，多出来的一截进 `_v_stretch` 弹簧（按钮行因此仍贴底边），`show_brief` 里复位。两者都**没有过渡动画**——动画会让被拖的边滞后于光标。**别改回按坐标判边**：卡片最外 8px 是投影留白，描边在 x=8，按坐标判（x≤6）用户按描边时事件落在 `frame` 上、进不了 `Card.mousePressEvent`，会变成"拖不动/在挪窗口" |
 | 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；**`_stagger_prepare()` 必须在 `show()` 之前把内容静态钉 0**，stagger **必须等 pos 动画 done 再启动**。少了 prepare 就是"卡片带全部文字滑进来（已经能读）→ 滑完一起变 0 → 再淡回来"，用户的原话是"弹出的动画头尾反了"（实测 t≈0-200ms 全 vis、t≈240ms 一起 0.00） |
 | 卡片关闭 | 150ms，InCubic | 向下 16px 滑出再 hide；**不走 windowOpacity 淡出**（同上，结尾会闪黑） |
 | 卡片长高 | 240ms，OutCubic | `_resize_keep_place`：`SetNoConstraint` 布局 + 只量不设 + 钉 frame 高 + 动画期间钉窗口最大高度 + resizeEvent 自愈（缺一不可，见坑清单） |
@@ -111,9 +111,10 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | --- | --- |
 | 令牌 `T` / 时长 `DUR` | `gui.py` 顶部，`QSS = Template(...).substitute(T)` |
 | 投影 `_shadow(w)` | 只给 `Card.frame`（`outer` 留 8/8/8/12 的边距让它画出来）；**Dock 面板不加**——贴屏幕边会被切 |
-| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度**不变**（= 记词板区 + `_pan_w` + 缝 6 + 细边 26），只滑 panel + 摆 wbpanel；rail 全程贴住窗口右缘（不能用 layout：窗口一变 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释）。可点区永远是 rail ∪ panel ∪ wbpanel 的**并集**（左边 300px 透明区必须始终裁掉，否则挡住底下的窗口） |
+| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度**不变**（= 记词板区 + `_pan_w` + 缝 6 + 细边 26），只滑 panel + 摆 wbpanel（抽屉关着时停在 `x=WB_W`，展开时 `x=0`）；rail 全程贴住窗口右缘（不能用 layout：窗口一变 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释）。可点区永远是 rail ∪ panel ∪ wbpanel 的**并集**（左边 300px 透明区必须始终裁掉，否则挡住底下的窗口）；抽屉必须比 panel/rail 低一层（`panel.raise_()` 三次调用见 `toggle_wordbook`） |
 | 记词板（存词） | 词头 ☆/★ → `Card.save_requested` → `App._on_save` → `Wordbook.add/remove` → `Dock.refresh_wordbook()`；导出 md/csv 在 `Wordbook.export_*`，`Dock._wb_export` 只负责选路径 |
 | 面板宽度可拖 | `Dock.eventFilter` 里的 `self.grip` 分支（面板内侧 6px 抓边），夹在 `PANEL_W_MIN..PANEL_W_MAX`，松手 `_save()` 写回 `dock.panel_w` |
+| 卡片尺寸可拖 | `Card.eventFilter` 四条抓边分支 → `_begin_edge(edge, gpos)` / `_drag_width()` / `_drag_height()` / `_end_edge()`；宽度边界 360..min(屏宽×45%,720) 写回 `card_width`，高度边界 = 详解 96 / 聊天 110 .. 一块屏装得下（`_box_limit`）。`_end_edge` 拖矮过就把滚动区的 `maximumHeight` 还原成 `_scroll_cap`（否则以后每次详解都被压在那个小高度上） |
 | 卡片弹出 / 关闭 / 长高 | `Card.show_brief()` / `hide_card()+_really_hide()` / `_resize_keep_place()` |
 | 托盘菜单三项 | `Tray.attach_dock()`（显示常驻面板 / 展开收起 / 面板挂在哪块屏） |
 | 面板展开/收起 + 卡片动画 | `Dock._place()` + `_settle()` / `Card.show_brief()`、`_resize_keep_place()`；2026-09-28 起统一由 `tmp/ui_audit.py` 实跑断言（0 项未过） |
@@ -144,7 +145,7 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | --- | --- | --- |
 | 超长单词（无空格） | 词头显示宽度上限 `max(200, 卡宽-170)`（430 宽时就是原来的 260px，卡拖宽后跟着放宽），超出省略号，完整词进 tooltip | `Card._word_cap()` + `#word` |
 | 长短语的词胶囊 | FlowLayout 换行排，绝不挤压变形；数量上限 12 | `FlowLayout` / `FlowBox` |
-| 超长详解 / 对话 | `detail` / `chat_log` 最大高度 = 可用屏高的 45%，超出自己滚 | `Card._build` |
+| 超长详解 / 对话 | `detail` / `chat_log` 最大高度 = 可用屏高的 45%，超出自己滚；拖卡片上下边可以把这块滚动区拉大（上限 = 一块屏装得下，下限详解 96 / 聊天 110），拖完松手会还原自然上限 | `Card._build` / `Card._drag_height` |
 | 卡片比可用区域还高 | `_place` 里上下都夹在屏幕内，不给内容掉出屏幕的机会 | `Card._place` |
 | 表单太长 | 设置窗按"基本 / 屏幕识别 / 问答模型 / 进阶"分四组（轻量标题 `#sechead`，不加边框） | `Settings` |
 | 设置窗比屏幕还高 | 装进 `QScrollArea` + 高度夹在可用屏高的 **80%**（2026-10-03 从 90% 收下来，理由见下一行）；`QScrollArea` 的 sizeHint 不等于内容高，**首次显示要按内容量一次**（否则缩成一小块） | `Settings.showEvent` |
@@ -175,7 +176,7 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 色彩 | 备注行语义色圆点：绿=省了 token、蓝=联网来源、红=错误；来源与对照去重 | 渲染图；`test_a4_no_color_outside_tokens` | 语义色只在承载信息时用；危险色不给退出按钮（低频操作不值得夸大） |
 | 动效 | 卡片元素 stagger 进场（45ms 间隔，顺序 = 布局上下顺序：词头→释义→对照→英文→备注）；**`_stagger_prepare()` 在 `show()` 前把内容钉 0**，且**必须等 pos 动画 done 再启动**——QGraphicsOpacityEffect 在窗口移动期间重绘不跟随，真机上把释义画到词头上（实测坑） | `test_b5_*` | 进/出/编排全齐；再叠就是炫技 |
 | 微交互 | 按下时内容下压 1px（padding 7/5 对调，总高不变）；复制"✓ 已复制"式反馈早已有 | QSS pressed 规则 + `test_a6_button_states_defined` | 四态 + 反馈 + 光边生长已闭环 |
-| 响应式 | 卡片宽 clamp 到 屏宽×45%（下限 360）；设置窗滚动 + 最多 80% 屏高 | `test_a2_card_shows_without_crash`、`test_a3_settings_scrollable` | Qt 逻辑像素天然 DPI 无关；Dock 按屏钉死 |
+| 响应式 | 卡片宽 clamp 到 屏宽×45%（下限 360），高由内容定、可拖到"一块屏装得下"为止；设置窗滚动 + 最多 80% 屏高 | `test_a2_card_shows_without_crash`、`test_a3_settings_scrollable` | Qt 逻辑像素天然 DPI 无关；Dock 按屏钉死 |
 | 原创性 | 卡片从细边方向滑出（空间叙事：卡片是从面板里"抽"出来的）；"省 token"用绿点可视化——把成本做成信息 | `test_b1_*`、`test_b2_*` | 光边/字标/monogram/滑出方向已构成完整识别系统 |
 
 ### 本轮新踩的坑
@@ -196,6 +197,17 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
   长卡片，窗口被钳成 261，底部复制/钉住按钮落在 y=558 ——**在窗口外，看不见也点不到**。
   所以一律走 `Card._stop_grow()`（掐动画 + 放开上限 + 复位闸门），`show_brief` 里再兜一次。
   `test_b5_grow_interrupt_releases_height_cap` 守着（已证伪：缺陷版报 244）。
+- **卡片高度不能直接 `resize`**（2026-10-03）。外层布局一被激活就按 sizeHint 把窗口顶回去
+  （实测想让 672，量出来窗口 1100、详解 871）—— 卡片高度从来不是独立变量，它永远等于
+  "内容需要的高度"。所以"拖上下边改高度"走的是：改那块滚动区（详解/聊天）的
+  `setFixedHeight`，再让 `_fit_height()` 重新量一遍（和 `_drag_width` 同一条路）。
+  另外 `setFixedHeight` 会把 `minimumHeight` 一起抬上去，所以"还能缩多少"必须用设计下限
+  （`_box_floor`：详解 96 / 聊天 110），**不能读 `minimumHeight()`**（拖过一次之后它恒等于当前高度）。
+- **量"拖动改尺寸"别用 QTest**（2026-10-03）。`_drag_height` 会移动窗口（上边拖动时下边钉住、
+  还要 `_clamp_pos`），而 QTest 把 local 坐标映射成 global 时跟着那个移动漂 —— 实测同一个
+  向下的拖动被读成 -131 / -180，来回拖还会 ±96 振荡。要量就用自己造的 FakeEv，把**绝对全局
+  坐标**喂给 `_begin_edge`/`_drag_height`（`tmp/h_probe.py` 就是这么量出 1:1 的）。
+  同理，`childAt(点)` 才是"用户按的到底是哪个控件"的判据（QTest 不做命中测试，投给谁就发给谁）。
 - **有道查不到时会把原词原样回显**（2026-10-02）。`_brief_youdao` 拿到的 `explains` 可能
   就是查询词本身（实测 `zzqxyzzy` → `['zzqxyzzy']`）。那不是释义，拿它当结果就是
   "识别出来的解释是英文"，而且会按顺序把后面的百度翻译、本地 9B 初稿全挡住。
