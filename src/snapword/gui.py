@@ -600,6 +600,13 @@ QSS = Template("""
 #dockpanel { background: $surface; border: 1px solid $hairline; border-right: none;
              border-top-left-radius: 8px; border-bottom-left-radius: 8px;
              border-top-right-radius: 0; border-bottom-right-radius: 0; }
+/* 记词板：跟主面板同一块料，但它是独立的一扇门（从主面板左边滑出来），左边缘的圆角由它出 */
+#wbpanel { background: $surface; border: 1px solid $hairline; border-right: none;
+           border-top-left-radius: 8px; border-bottom-left-radius: 8px;
+           border-top-right-radius: 0; border-bottom-right-radius: 0; }
+/* 主面板左边缘的抓条：平时全透明，鼠标移上去才亮一条蓝（"这里能拖"） */
+#dockgrip { background: transparent; }
+#dockgrip:hover { background: $blue_soft; }
 QLabel { color: $body; }
 #word { color: $ink; font-size: 24px; font-weight: 600; }
 #phon { color: $mute; font-size: 13px; }
@@ -918,8 +925,10 @@ class Card(QtWidgets.QWidget):
     ask_requested = QtCore.Signal(object, str, bool)   # brief, 问题, 是否用 DeepSeek
     detail_requested = QtCore.Signal(object)
     word_clicked = QtCore.Signal(str)
+    save_requested = QtCore.Signal(object)             # 存词 / 取消存词（由 App 落库）
+    width_changed = QtCore.Signal(int)                 # 用户拖右边改了宽度（由 App 记进配置）
 
-    def __init__(self, font_pt=10):
+    def __init__(self, font_pt=10, width=0):
         super().__init__(None)
         self.setWindowFlags(
             QtCore.Qt.WindowType.FramelessWindowHint
@@ -929,14 +938,17 @@ class Card(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(QSS)
-        # 响应式：430 是主尺寸，但窄屏上要收（430 在 1024 宽的屏上要吃掉 42% 的横向空间）；
-        # 下限 360，再窄释义就没法读了。
+        # 宽度：配置里存了就用它（用户拖过右边），否则自适应——430 是主尺寸，窄屏上要收
+        # （430 在 1024 宽的屏上要吃掉 42% 的横向空间）；下限 360，再窄释义就没法读了。
         scr = QtGui.QGuiApplication.primaryScreen()
         avail_w = scr.availableGeometry().width() if scr is not None else 1920
-        self.setFixedWidth(max(360, min(430, int(avail_w * 0.45))))
+        self._w = int(width) or max(360, min(430, int(avail_w * 0.45)))
+        self.setFixedWidth(self._w)
         self.brief = None
         self.pinned = False
         self._drag = None
+        self._drag_w = None             # 拖右边改宽度时的起点（见 mousePressEvent）
+        self.saved = False              # 这个词在不在生词本里（决定「存词」按钮长什么样）
         self._jobs = []
         # 「生成中… N 秒」用：模型冷启动十几秒，只有一句「生成中…」用户分不清是在想还是已经死了
         self._detail_t0 = 0.0
@@ -946,6 +958,10 @@ class Card(QtWidgets.QWidget):
         self._build()
         self.setFont(QtGui.QFont("Microsoft YaHei UI", font_pt))
         self._typography()      # 必须在 setFont 之后：setFont 会把字距一起冲掉
+
+    def _word_cap(self):
+        """词头那一行给词留的最大宽度：卡宽 - 170（430 宽时正好是原来的 260）。"""
+        return max(200, int(self._w) - 170)
 
     def _typography(self):
         """排版的最后一公里：字距随字号反向走——大号收紧、小号放开。
@@ -985,13 +1001,21 @@ class Card(QtWidgets.QWidget):
         # 超长词（45 个字母那种）里没有空格，换行救不了它，只会把布局搅乱
         # （实测"整句/词组"被折成两行、徽章被顶飞）。按平台常规处理：显示宽度设上限，
         # 超出用省略号截断，完整词放到 tooltip 里（见 show_brief）。
-        self.lb_word.setMaximumWidth(260)
+        self.lb_word.setMaximumWidth(self._word_cap())
         self.lb_phon = QtWidgets.QLabel("", objectName="phon")
         self.lb_phon.setWordWrap(True)
         self.lb_src = QtWidgets.QLabel("", objectName="src")
+        # 「存词」放词头这一行（☆/★），不跟底下的动作按钮挤：六个按钮实测 hint 合计
+        # 411px + 间距，430 宽的可用只有 376 —— 塞进去必然换行，而且是难看的 5+1。
+        # ☆ 是"收藏/存下来"的通用位置（词头右上角），点一下变 ★，再点取消。
+        self.btn_save = SmoothButton("☆", "ghost")
+        self.btn_save.setFixedWidth(30)
+        self.btn_save.setToolTip("存到记词板（再点一次取消）")
+        self.btn_save.clicked.connect(self._toggle_save)
         head.addWidget(self.lb_word)
         head.addWidget(self.lb_phon)
         head.addStretch(1)
+        head.addWidget(self.btn_save)
         head.addWidget(self.lb_src)
         v.addLayout(head)
 
@@ -1078,13 +1102,16 @@ class Card(QtWidgets.QWidget):
         self.chat_row.hide()
         v.addWidget(self.chat_row)
 
-        btns = QtWidgets.QHBoxLayout()
-        btns.setSpacing(4)
+        # 按钮行用 FlowLayout（换行），不用 QHBoxLayout：卡片宽度可以拖（见 mousePressEvent），
+        # 拖到 360 那档时这一行必须能换行而不是变形。文案也顺手收短：「详细解释」→「详解」。
+        # （「存词」不在这行 —— 它在词头，见上面 btn_save 的注释。）
+        btns = FlowLayout(spacing=4)
         hr = QtWidgets.QFrame(objectName="hr")
         hr.setFixedHeight(1)
         v.addWidget(hr)
         # 全部换成会过渡的按钮（QSS 没有 transition，普通按钮的状态切换是一帧硬切）
-        self.btn_detail = SmoothButton("详细解释", "primary")
+        self.btn_detail = SmoothButton("详解", "primary")
+        self.btn_detail.setToolTip("生成详细解释（词典 + 模型）")
         # "问 AI" 点下去是**展开**一个提问区，不是立刻跳转 —— 加展开指示，别让人以为按错了
         self.btn_chat = SmoothButton("问 AI ▾", "normal")
         self.btn_copy = SmoothButton("复制", "normal")
@@ -1093,7 +1120,6 @@ class Card(QtWidgets.QWidget):
         self.btn_close.setToolTip("关闭（也可以按 Esc）")
         btns.addWidget(self.btn_detail)
         btns.addWidget(self.btn_chat)
-        btns.addStretch(1)
         btns.addWidget(self.btn_copy)
         btns.addWidget(self.btn_pin)
         btns.addWidget(self.btn_close)
@@ -1126,6 +1152,9 @@ class Card(QtWidgets.QWidget):
         self.chat_log.hide()
         self.chat_row.hide()
         self.chat_log.clear()
+        # 换词了：先当作"没存过"，App 拿到生词本的真状态后会再校正一次（见 App._show_brief）。
+        # 不这么做的话复用同一张卡片查第二个词，「已存」会挂在没存过的词上。
+        self.set_saved(False)
 
         asked = brief.get("query") or ""
         lex = brief.get("lexeme") or asked
@@ -1287,32 +1316,45 @@ class Card(QtWidgets.QWidget):
         self._resize_keep_place()
 
     def start_detail_wait(self):
-        """「详细解释」按下去那一刻叫它：按钮上开始数秒，让人看得见它在动。"""
+        """「详解」按下去那一刻叫它：正文区开始数秒，让人看得见它在动。
+
+        秒数写在**正文区**而不是按钮上：按钮行是 FlowLayout，文案一变长（「生成中… 13 秒」）
+        就会重排、卡片跟着一跳；而且按钮宽度变了看起来像整行在抖。正文区本来就在说
+        「正在整理…」，在那里更新秒数最自然。
+        """
         self._detail_t0 = time.monotonic()
-        self.btn_detail.setText("生成中… 0 秒")
         self._detail_tick.start()
+        self._detail_elapsed()
 
     def _detail_elapsed(self):
         # 不判 btn_detail.isEnabled()：按下去那一刻就把它禁用了，那样第一个 tick 就自杀。
         # 收尾由 set_detail / _on_job_fail 负责停表；卡片没了这个 QTimer 跟着一起销毁。
-        self.btn_detail.setText("生成中… %d 秒" % int(time.monotonic() - self._detail_t0))
+        n = int(time.monotonic() - self._detail_t0)
+        tip = "正在整理…（本地模型冷启动要十几秒，DeepSeek 快一些）"
+        if n >= 3:
+            tip = ("正在整理…已经 %d 秒。\n\n词典释义在上面；模型那部分本地 9B 冷启动"
+                   "要十几秒，DeepSeek 快一些。" % n)
+        self.detail.show()
+        self.detail.setPlainText(tip)
 
     def set_detail(self, md, err=None):
         # 收尾的人负责把按钮还原。以前这里不还原、只有下一次查词才 setEnabled(True)，
         # 于是文案永远停在「生成中…」，下一个词点不动详解（hy4 评审第 4 条）。
         self._detail_tick.stop()
         self.btn_detail.setEnabled(True)
-        self.btn_detail.setText("详细解释")
+        self.btn_detail.setText("详解")
         self.detail.show()
         if md:
             self.detail.setMarkdown(md)
         else:
             self.detail.setPlainText("没能生成详解：" + (err or "模型没返回内容"))
         # 高度跟内容走：短详解不留一大块空白（minimum 260 那会儿底下空出两百多像素），
-        # 长详解夹到上限（超了自己滚）。排版宽度必须是**文字区**的宽：
-        # 卡宽 430 - frame 左右边距 28 - 边框 2 - QSS 水平 padding 24 = 376；
-        # 按 376 算行数、再给 24px 垂直余量（上下 padding 16 + 边框 2 + 取整）。
-        vw = max(self.detail.viewport().width(), 352)
+        # 长详解夹到上限（超了自己滚）。排版宽度必须是**文字区**的宽 —— 卡片宽度现在
+        # 能拖（360~720），所以直接量视口，不能沿用按 430 算出来的 376。
+        # 视口宽在第一帧之前是 0，那时按卡片宽度估一个（frame 边距 28 + 边框 2 + padding 24 = 54）。
+        vw = self.detail.viewport().width()
+        if vw < 200:
+            vw = max(200, self.width() - 54)
         self.detail.document().setTextWidth(vw)
         need = int(self.detail.document().size().height()) + 24
         self.detail.setFixedHeight(max(96, min(need, self.detail.maximumHeight())))
@@ -1327,7 +1369,9 @@ class Card(QtWidgets.QWidget):
         color = {"你": T["blue"], "AI": T["ink"], "系统": T["mute"]}.get(who, T["ink"])
         self.chat_log.append('<b style="color:%s">%s</b>：%s' % (color, who, _esc(text)))
         # 高度跟内容走（同 set_detail 的算法）：消息多了才长，长到上限自己滚
-        vw = max(self.chat_log.viewport().width(), 352)
+        vw = self.chat_log.viewport().width()
+        if vw < 200:
+            vw = max(200, self.width() - 54)
         self.chat_log.document().setTextWidth(vw)
         need = int(self.chat_log.document().size().height()) + 24
         self.chat_log.setFixedHeight(max(110, min(need, self.chat_log.maximumHeight())))
@@ -1394,6 +1438,23 @@ class Card(QtWidgets.QWidget):
             # 用户主动要问，才把键盘交过去（这就是"不抢焦点"的让步）
             self.activateWindow()
             self.chat_in.setFocus()
+        else:
+            # 收起：**消息区也得跟着藏，高度还得还回去**。原来只藏了输入行，消息区原地不动、
+            # 卡片高度保持展开时的高度，看起来就像"收起没生效、只是被上面的详解挡住了"。
+            self.chat_log.hide()
+            self._resize_keep_place()
+
+    def _toggle_save(self):
+        """存词 / 取消存词。落库由 App 做（它拿着 Wordbook），这里只管按钮长相。"""
+        self.save_requested.emit(self.brief)
+
+    def set_saved(self, on):
+        self.saved = bool(on)
+        # ☆ → ★：一个字符换一个字符，宽度不动（按钮本来就钉了 30px），卡片不会跳。
+        # 状态靠 set_active 的蓝底 + 星形一起说。
+        self.btn_save.setText("★" if self.saved else "☆")
+        self.btn_save.setToolTip("已在记词板里，再点一次取消" if self.saved else "存到记词板")
+        self.btn_save.set_active(self.saved)
 
     def _send(self, _deep):
         q = self.chat_in.text().strip()
@@ -1506,6 +1567,10 @@ class Card(QtWidgets.QWidget):
            压成窗口的高度，里面的文字会跟着重排/被挤扁。钉住之后就是"窗口长高、内容被揭开"。
         """
         self.frame.setMaximumHeight(16777215)      # 先解除上一轮钉住的高度
+        # `setFixedHeight` 是 min=max，只把 maximum 放开的话**下限还留着**，`adjustSize()`
+        # 就只能往上长、缩不回去 —— 实测收起聊天区 / 换成短词之后卡片高度纹丝不动
+        # （621 → 622）。所以测量前必须把下限也松掉。
+        self.frame.setMinimumHeight(0)
         # **先 polish 再量**：QSS 的字号/字体要等 polish 才生效，不 polish 就量，
         # 量出来的是"构造字体"的行数（实测 322 字正文 299 vs 470，裁掉小半截）。
         # ensurePolished 会连同子控件一起 polish。
@@ -1675,17 +1740,93 @@ class Card(QtWidgets.QWidget):
             return
         self._after_grow()                    # 长高动画收尾 → 揭示淡入（绝不与几何动画重叠）
 
-    # 拖标题栏移动
+    # 拖标题栏移动 / 拖左右边改宽度
+    #
+    # 宽度那一档的判定：卡片最外面 8px 是 outer 的边距（frame 在里面），鼠标落在那里时
+    # 落点是 Card 自己、不是 frame 里的子控件，所以 press 能收到 —— 离左右边 ≤6px 就算抓边。
+    def _edge_at(self, x):
+        if x <= 6:
+            return "left"
+        if x >= self.width() - 6:
+            return "right"
+        return ""
+
     def mousePressEvent(self, e):
-        if e.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        if e.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        edge = self._edge_at(int(e.position().x()))
+        if edge == "right":
+            self._drag_w = (self.width(), e.globalPosition().toPoint().x())
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            return
+        if edge == "left":
+            # 左边拖动：窗口的右上角钉住不动（宽度变了多少，x 就往回退多少）
+            self._drag_w = ("left", self.width(), e.globalPosition().toPoint().x(),
+                            self.x() + self.width())
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            return
+        self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, e):
+        if self._drag_w is not None:
+            self._drag_width(e)
+            return
         if self._drag is not None:
             self.move(e.globalPosition().toPoint() - self._drag)
+            return
+        # 悬停在边上给个"能拖"的光标
+        self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor if self._edge_at(int(e.position().x()))
+                       else QtCore.Qt.CursorShape.ArrowCursor)
+
+    def _drag_width(self, e):
+        gx = e.globalPosition().toPoint().x()
+        # 下限 360（再窄释义没法读），上限取"当前这块屏的 45%"和 720 里更小的那个：
+        # 430 是主尺寸，但大屏上允许拖宽一点（长英文释义少折几行）。
+        scr = (QtWidgets.QApplication.screenAt(self.pos())
+               or QtWidgets.QApplication.primaryScreen())
+        avail = scr.availableGeometry().width() if scr is not None else 1920
+        hi = max(360, min(int(avail * 0.45), 720))
+        right = None
+        if self._drag_w[0] == "left":                  # 抓的是左边：右上角钉住不动
+            _, w0, x0, right = self._drag_w
+            w = max(360, min(hi, w0 + (x0 - gx)))      # 往左拖 = 变宽
+        else:                                          # 抓的是右边：左上角钉住不动
+            w0, x0 = self._drag_w
+            w = max(360, min(hi, w0 + (gx - x0)))
+        if w == self.width():
+            return
+        self._w = w
+        self.setFixedWidth(w)
+        self.lb_word.setMaximumWidth(self._word_cap())   # 词头留给词的那一段跟着卡宽走
+        self.setMaximumHeight(16777215)     # 变窄后行数变了，重新量高度（_fit_height 会夹回来）
+        new = self._fit_height()
+        self.setFixedHeight(new)
+        if right is not None:
+            self.move(right - w, self.y())
+        self.move(*self._clamp_pos(new, self.x(), self.y()))
+        self.update()
 
     def mouseReleaseEvent(self, _):
         self._drag = None
+        if self._drag_w is not None:
+            self._drag_w = None
+            self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+            self.width_changed.emit(int(self.width()))
+
+    def wheelEvent(self, e):
+        """卡片空白处的滚轮转给"正在显示的那块长内容"。
+
+        实测：详解/聊天区自己都能滚（详解滚动条 max=956），但鼠标停在卡片别处（词头、
+        例句、按钮之间的空白）时一样什么都没发生——用户说的"不能滚动"就是这个。
+        没有可滚的内容就不接受事件，让它按默认往上冒（避免把滚轮吃在一个静止的卡片上）。
+        """
+        for box in (self.chat_log, self.detail):
+            if box.isVisible() and box.verticalScrollBar().maximum() > 0:
+                bar = box.verticalScrollBar()
+                bar.setValue(bar.value() - e.angleDelta().y())
+                e.accept()
+                return
+        super().wheelEvent(e)
 
 
 class Tray(QtWidgets.QSystemTrayIcon):
@@ -1900,15 +2041,25 @@ class Dock(QtWidgets.QWidget):
     PANEL_W = 320
     PANEL_H = 300
     EDGE_GAP = 0            # 贴死屏幕右边缘（留缝会被看成"没贴边"）
+    WB_W = 300              # 记词板（挂在主面板左边，自己一扇"活板门"）
+    PANEL_W_MIN = 260       # 主面板宽度可拖：下限（再窄按钮会挤破）
+    PANEL_W_MAX = 460       # 上限（再宽会盖住屏幕里太多东西）
 
-    def __init__(self, cfg, on_pick, on_lookup, on_clip, on_settings, on_quit):
+    def __init__(self, cfg, on_pick, on_lookup, on_clip, on_settings, on_quit,
+                 wb=None, on_word=None):
         super().__init__(None)
         self.cfg = cfg
         d = cfg.get("dock") or {}
         self.expanded = bool(d.get("expanded"))
+        self.wb_open = bool(d.get("wb"))
         self._y = d.get("y")
         self._drag = None
         self._moved = False
+        self._grip_drag = None
+        self._pan_w = int(d.get("panel_w") or 0) or self.PANEL_W
+        # 记词板的数据源（可能在测试里是 None：Dock 的 UI 必须还能建起来）
+        self.wb = wb
+        self.on_word = on_word or (lambda _w: None)
         # 钉死在一台屏幕上。**不能**用 self.screen() —— 它是按窗口当前所在位置推断的，
         # 点在细边的子控件上时事件被转发过来，那一瞬间会解成别的屏幕，窗口直接被甩到副屏
         # （实测 geo 从 QRect(1689,396,352,360) 变成 QRect(3908,353,293,300)）。
@@ -1934,8 +2085,16 @@ class Dock(QtWidgets.QWidget):
         # "面板从细边后面抽出来"。用 layout 做不到：窗口一变窄，layout 会把 rail 留在旧的
         # 坐标上（跑到窗口外面去），而收起时窗口只有 26 宽。
         self.panel = QtWidgets.QFrame(self, objectName="dockpanel")
-        self.panel.setFixedWidth(self.PANEL_W)
+        self.panel.setFixedWidth(self._pan_w)
         self.panel.setFixedHeight(self.PANEL_H)
+        # 主面板左边缘的抓条：宽度可拖。**必须单独一个控件**：面板里铺满了子控件，
+        # 鼠标落在边上多半落在子控件身上，事件到不了 Dock（细边那条靠 eventFilter 也是同理）。
+        self.grip = QtWidgets.QFrame(self.panel, objectName="dockgrip")
+        self.grip.setFixedWidth(6)
+        self.grip.setFixedHeight(self.PANEL_H)
+        self.grip.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+        self.grip.setToolTip("拖动改面板宽度")
+        self.grip.installEventFilter(self)
 
         v = QtWidgets.QVBoxLayout(self.panel)
         v.setContentsMargins(16, 14, 16, 14)
@@ -1968,6 +2127,12 @@ class Dock(QtWidgets.QWidget):
         b1.addWidget(clip, 2)
         v.addLayout(b1)
 
+        # 记词板：一整行按钮（宽度跟着面板走，不跟别的按钮抢空间）
+        self.btn_wb = SmoothButton("记词板", "normal")
+        self.btn_wb.setToolTip("存下来的词（活板门从左边展开）")
+        self.btn_wb.clicked.connect(self.toggle_wordbook)
+        v.addWidget(self.btn_wb)
+
         self.lb_hint = QtWidgets.QLabel("", objectName="note")
         self.lb_hint.setWordWrap(True)
 
@@ -1991,12 +2156,182 @@ class Dock(QtWidgets.QWidget):
         self.rail.setFixedWidth(self.RAIL_W)
         self.rail.installEventFilter(self)
 
+        # 记词板那一扇"活板门"（窗口最左边，收起时整扇滑到窗口外）
+        self.wbpanel = QtWidgets.QFrame(self, objectName="wbpanel")
+        self.wbpanel.setFixedWidth(self.WB_W)
+        self.wbpanel.setFixedHeight(self.PANEL_H)
+        wv = QtWidgets.QVBoxLayout(self.wbpanel)
+        wv.setContentsMargins(14, 14, 14, 12)
+        wv.setSpacing(8)
+        self.wb_head = QtWidgets.QLabel("记词板", objectName="panelword")
+        wv.addWidget(self.wb_head)
+        streak2 = QtWidgets.QFrame(objectName="streak")
+        streak2.setFixedHeight(1)
+        wv.addWidget(streak2)
+        self.wb_scroll = QtWidgets.QScrollArea()
+        self.wb_scroll.setWidgetResizable(True)
+        self.wb_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.wb_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.wb_scroll.setStyleSheet("QScrollArea{background:transparent}"
+                                     "QScrollArea>QWidget>QWidget{background:transparent}")
+        self.wb_list = QtWidgets.QWidget()
+        self.wb_v = QtWidgets.QVBoxLayout(self.wb_list)
+        self.wb_v.setContentsMargins(0, 0, 0, 0)
+        self.wb_v.setSpacing(4)
+        self.wb_v.addStretch(1)
+        self.wb_scroll.setWidget(self.wb_list)
+        self.wb_scroll.viewport().setStyleSheet("background:transparent")
+        wv.addWidget(self.wb_scroll, 1)
+        self.wb_empty = QtWidgets.QLabel("还没有存过词。\n框选或查一个词，点卡片上的「存词」。",
+                                         objectName="note")
+        self.wb_empty.setWordWrap(True)
+        wv.addWidget(self.wb_empty)
+        wbrow = QtWidgets.QHBoxLayout()
+        wbrow.setSpacing(8)
+        self.btn_wb_export = SmoothButton("导出", "ghost")
+        self.btn_wb_export.setToolTip("导出成 Markdown 或 CSV（按扩展名自动选）")
+        self.btn_wb_export.clicked.connect(self._wb_export)
+        self.btn_wb_clear = SmoothButton("清空", "ghost")
+        self.btn_wb_clear.clicked.connect(self._wb_clear)
+        wbrow.addWidget(self.btn_wb_export, 1)
+        wbrow.addWidget(self.btn_wb_clear, 1)
+        wv.addLayout(wbrow)
+        self.grip.raise_()          # 抓条要在面板内容之上才收得到鼠标
+        self.refresh_wordbook()
+
     def set_hint(self, text):
         self.lb_hint.setText(text)
+
+    # ---------- 记词板 ----------
+    def toggle_wordbook(self):
+        """开/关那扇"活板门"。曲线用 OutBack：抽屉抽出来时"过冲一点点再回弹"，
+        这一下就是"活板门"的手感（主面板用的是 OutQuint，收得住不弹）。"""
+        self.wb_open = not self.wb_open
+        self.refresh_wordbook()
+        if self.wb_open:
+            self.clearMask()             # 动画期间整窗可画（mask 会把滑动中的面板裁掉）
+            self.wbpanel.setVisible(True)
+            self.wbpanel.move(-self.WB_W, 0)
+            _anim(self.wbpanel, b"pos", QtCore.QPoint(-self.WB_W, 0), QtCore.QPoint(0, 0),
+                  DUR["base"], curve=QtCore.QEasingCurve.Type.OutBack, done=self._settle)
+        else:
+            _anim(self.wbpanel, b"pos", self.wbpanel.pos(), QtCore.QPoint(-self.WB_W, 0),
+                  DUR["base"], curve=QtCore.QEasingCurve.Type.InCubic, done=self._settle)
+        self._save()
+
+    def _wb_counts(self):
+        if self.wb is None:
+            return 0, 0
+        try:
+            items = self.wb.items()
+        except Exception:
+            traceback.print_exc()
+            return 0, 0
+        return len(items), sum(1 for it in items if it.get("mastered"))
+
+    def refresh_wordbook(self):
+        """重建列表（增删改之后都走这里，别去改单行——列表是"真相的投影"）。"""
+        n, mastered = self._wb_counts()
+        tail = "（%d 已掌握）" % mastered if mastered else ""
+        self.wb_head.setText("记词板 · %d 词%s" % (n, tail))
+        self.btn_wb.setText("记词板 · %d" % n if n else "记词板")
+        # 清空旧行（最后一项是 addStretch(1)）
+        while self.wb_v.count() > 1:
+            it = self.wb_v.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self.wb_empty.setVisible(not n)
+        if self.wb is None or not n:
+            return
+        items = self.wb.items()[:200]       # 列表只画前 200 条，再多也没人翻
+        for it in items:
+            self.wb_v.insertWidget(self.wb_v.count() - 1, self._wb_row(it))
+        if self.wb_open:
+            self.wb_scroll.verticalScrollBar().setValue(0)
+
+    def _wb_row(self, it):
+        row = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        word = it["word"]
+        b = SmoothButton(word, "ghost")
+        b.setToolTip("再查一次：%s" % (it.get("cn") or word))
+        b.clicked.connect(lambda _=False, w=word: self.on_word(w))
+        b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                        QtWidgets.QSizePolicy.Policy.Fixed)
+        h.addWidget(b, 1)
+        star = SmoothButton("★" if it.get("mastered") else "☆", "ghost")
+        star.setFixedWidth(30)
+        star.setToolTip("点一下取消「已掌握」" if it.get("mastered") else "标成「已掌握」（沉到列表底部）")
+        star.clicked.connect(lambda _=False, w=word, on=not it.get("mastered"):
+                             self._wb_master(w, on))
+        h.addWidget(star)
+        x = SmoothButton("✕", "ghost")
+        x.setFixedWidth(30)
+        x.setToolTip("从记词板删掉")
+        x.clicked.connect(lambda _=False, w=word: self._wb_del(w))
+        h.addWidget(x)
+        return row
+
+    def _wb_master(self, word, on):
+        if self.wb is not None:
+            self.wb.set_mastered(word, on)
+        self.refresh_wordbook()
+
+    def _wb_del(self, word):
+        if self.wb is not None:
+            self.wb.remove(word)
+        self.refresh_wordbook()
+
+    def _wb_clear(self):
+        if self.wb is None or not self._wb_counts()[0]:
+            return
+        r = QtWidgets.QMessageBox.question(
+            self, "清空记词板", "把 %d 个词都删掉？这个动作不能撤销。" % self._wb_counts()[0],
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if r != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.wb.clear()
+        self.refresh_wordbook()
+        self.set_hint("记词板已清空")
+
+    def _wb_export(self):
+        if self.wb is None or not self._wb_counts()[0]:
+            self.set_hint("记词板还是空的，没东西可导出")
+            return
+        from pathlib import Path
+        home = Path.home() / "Desktop"
+        if not home.is_dir():
+            home = Path.home()
+        default = str(home / "SnapWord-记词板.md")
+        path, _sel = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出记词板", default, "Markdown (*.md);;CSV (*.csv)")
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                self.wb.export_csv(path)
+            else:
+                self.wb.export_md(path)
+        except Exception as e:
+            traceback.print_exc()
+            self.set_hint("导出失败：%s" % e)
+            return
+        self.set_hint("已导出到 %s" % path)
 
     # ---------- 展开 / 收起 / 摆位置 ----------
     def toggle(self):
         self.expanded = not self.expanded
+        if not self.expanded and self.wb_open:
+            # 主面板收回去时记词板一起收：那扇门本来就没有"自己单独开着"的样子
+            # （它的开关按钮在主面板里，展开时才有）。
+            self.wb_open = False
+            self.wbpanel.move(-self.WB_W, 0)
+            self.wbpanel.setVisible(False)
         self._apply(animate=True)
         if self.expanded:
             self.input.setFocus()       # 展开就是为了打字（点细边本来就是用户主动操作）
@@ -2034,12 +2369,14 @@ class Dock(QtWidgets.QWidget):
         if scr is None:
             return
         g = scr.availableGeometry()      # 扣掉任务栏那一条（这台机器上任务栏自动隐藏，等于全屏）
-        W = self.PANEL_W + 6 + self.RAIL_W      # panel 320 + 6px 缝 + rail 26 = 352（rail 别被窗口裁掉）
+        x0 = self.WB_W                   # 主面板展开时的窗口内 x：左边 300px 留给记词板
+        W = x0 + self._pan_w + 6 + self.RAIL_W   # 记词板 + 主面板 + 6px 缝 + rail（rail 别被窗口裁掉）
         h = self.PANEL_H
         y = g.y() + (g.height() - h) // 2 if self._y is None else int(self._y)
         y = min(max(g.y(), y), max(g.y(), g.y() + g.height() - h))
-        # 右边缘永远是屏幕右边缘（EDGE_GAP=0）。窗口**永远 352 宽**（panel 320 + 6px 缝 +
-        # rail 26），展开/收起只滑 panel，不改窗口尺寸。
+        # 右边缘永远是屏幕右边缘（EDGE_GAP=0）。窗口宽度只随面板宽度变，展开/收起只滑
+        # panel，不改窗口尺寸。**记词板是从左边滑出来的**：窗口一开始就有它的位置，
+        # 所以开关记词板不动主面板一个像素。
         # 旧实现是窗口 26↔352 地 resize，它一口气带来两个用户能看到的毛病：
         # 1) Windows 对半透明窗口 resize，会先拿旧 buffer **拉伸**显示一帧 —— rail 是不透明
         #    的，那帧被拉长的 rail 就画出来了（新增的 326px 在窗口左侧），用户看到的就是
@@ -2050,13 +2387,15 @@ class Dock(QtWidgets.QWidget):
         right = g.x() + g.width() - self.EDGE_GAP
         geo = QtCore.QRect(int(right - W), int(y), W, h)
         if self.geometry() != geo:
-            self.setGeometry(geo)                # 只有竖直拖动/换屏才会走到这
+            self.setGeometry(geo)                # 只有竖直拖动/换屏/拖宽度才会走到这
 
-        x_hidden = self.PANEL_W + self.RAIL_W    # panel 藏起来时的窗口内 x
-        self.rail.setGeometry(self.PANEL_W + 6, 0, self.RAIL_W, h)
+        x_hidden = x0 + self._pan_w + self.RAIL_W   # panel 藏起来时的窗口内 x
+        self.rail.setGeometry(x0 + self._pan_w + 6, 0, self.RAIL_W, h)
         if not animate:
-            self.panel.move(0 if self.expanded else x_hidden, 0)
+            self.panel.move(x0 if self.expanded else x_hidden, 0)
             self.panel.setVisible(self.expanded)
+            self.wbpanel.move(0 if self.wb_open else -self.WB_W, 0)
+            self.wbpanel.setVisible(self.wb_open)
             self._settle()
             return
         # 起点用**当前**位置而不是写死的端点：连点细边时（上一个动画还没跑完就反向），
@@ -2065,28 +2404,34 @@ class Dock(QtWidgets.QWidget):
             self.clearMask()                     # 动画期间整窗可画（mask 会把 panel 裁掉）
             self.panel.setVisible(True)
             # 曲线选 OutQuint：抽屉抽出要的是"冲出来、尾巴收住"。
-            _anim(self.panel, b"pos", self.panel.pos(), QtCore.QPoint(0, 0),
+            _anim(self.panel, b"pos", self.panel.pos(), QtCore.QPoint(x0, 0),
                   DUR["base"], curve=QtCore.QEasingCurve.Type.OutQuint, done=self._settle)
         else:
             _anim(self.panel, b"pos", self.panel.pos(), QtCore.QPoint(x_hidden, 0),
                   DUR["base"], curve=QtCore.QEasingCurve.Type.InCubic, done=self._settle)
 
     def _settle(self):
-        """把窗口和两个子控件摆成当前状态的"静止样子"（动画结束时也走这里）。
+        """把窗口和子控件摆成当前状态的"静止样子"（动画结束时也走这里）。
 
-        窗口固定 352 宽之后，收起时左边 326px 是透明的：不设 mask 的话，鼠标点到那个
-        区域点到的是这个窗口而不是背后的应用（透明窗口照样吃点击）。所以收起时把可点
-        区域裁成细边那一条，展开时再放开。
+        窗口是固定宽度的一块（记词板宽 + 主面板宽 + 缝 + 细边），收起时大部分是透明的：
+        不设 mask 的话，鼠标点到那块透明区域点到的是这个窗口而不是背后的应用（透明窗口
+        照样吃点击）。所以可点区域要**逐块**裁出来：细边永远算，主面板展开才算，记词板
+        开着才算。
         """
-        self.rail.setGeometry(self.PANEL_W + 6, 0, self.RAIL_W, self.PANEL_H)
+        x0 = self.WB_W
+        x_rail = x0 + self._pan_w + 6
+        self.rail.setGeometry(x_rail, 0, self.RAIL_W, self.PANEL_H)
+        self.panel.setVisible(self.expanded)
+        self.panel.move(x0 if self.expanded else x0 + self._pan_w + self.RAIL_W, 0)
+        self.wbpanel.setVisible(self.wb_open)
+        self.wbpanel.move(0 if self.wb_open else -self.WB_W, 0)
+        reg = QtGui.QRegion(x_rail, 0, self.RAIL_W, self.PANEL_H)
         if self.expanded:
-            self.panel.move(0, 0)
-            self.panel.setVisible(True)
-            self.clearMask()
-        else:
-            self.panel.move(self.PANEL_W + self.RAIL_W, 0)
-            self.panel.setVisible(False)
-            self.setMask(QtGui.QRegion(self.PANEL_W + 6, 0, self.RAIL_W, self.PANEL_H))
+            reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
+        if self.wb_open:
+            reg = reg.united(QtGui.QRegion(0, 0, self.WB_W, self.PANEL_H))
+        self.setMask(reg)
+        self.grip.setGeometry(0, 0, 6, self.PANEL_H)
         self.raise_()
 
     def showEvent(self, ev):
@@ -2097,14 +2442,38 @@ class Dock(QtWidgets.QWidget):
         """卡片该出现在哪儿：dock 左边、别被 dock 盖住。
 
         `Card.show_at` 是按 `at.x() - 卡片宽/3` 摆的，所以这里把那个偏移算进去，
-        让卡片右边缘正好落在 dock 左边 12px 处。
+        让卡片右边缘正好落在 dock 左边 12px 处。卡片宽度是可拖的，得按配置里的实际
+        宽度算 —— 写死 430 的话，卡片被拖窄/拖宽之后会偏。
         """
-        w = 430
-        return QtCore.QPoint(self.geometry().left() - 12 - w + w // 3,
+        w = int(self.cfg.get("card_width") or 0) or 430
+        left = self.geometry().left() + self.WB_W      # 主面板的左边缘（不是窗口的）
+        if self.expanded and self.wb_open:
+            left = self.geometry().left()              # 记词板也开着时避让它
+        return QtCore.QPoint(left - 12 - w + w // 3,
                              self.geometry().top() + 46)
 
     def eventFilter(self, obj, ev):
         t = ev.type()
+        if obj is self.grip:
+            if t == QtCore.QEvent.Type.MouseButtonPress and ev.button() == QtCore.Qt.MouseButton.LeftButton:
+                self._grip_drag = True
+                return True
+            if t == QtCore.QEvent.Type.MouseMove and self._grip_drag:
+                scr = self._screen()
+                g = scr.availableGeometry() if scr else QtCore.QRect(0, 0, 0, 0)
+                # 抓条贴着的就是面板左边缘：把"屏幕右边缘到鼠标"这段减掉细边和缝，就是面板宽度。
+                w = int(g.x() + g.width() - self.EDGE_GAP - ev.globalPosition().toPoint().x()) \
+                    - self.RAIL_W - 6
+                w = min(max(self.PANEL_W_MIN, w), self.PANEL_W_MAX)
+                if w != self._pan_w:
+                    self._pan_w = w
+                    self.panel.setFixedWidth(w)
+                    self._place(animate=False)
+                return True
+            if t == QtCore.QEvent.Type.MouseButtonRelease and self._grip_drag:
+                self._grip_drag = None
+                self._save()
+                return True
         if obj is self.rail:
             if t == QtCore.QEvent.Type.MouseButtonPress and ev.button() == QtCore.Qt.MouseButton.LeftButton:
                 self._drag = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -2133,6 +2502,8 @@ class Dock(QtWidgets.QWidget):
         from . import config       # 延迟导入，免得 gui 和 config 互相缠
         d = self.cfg.setdefault("dock", {})
         d["expanded"] = self.expanded
+        d["wb"] = bool(self.wb_open)
+        d["panel_w"] = int(self._pan_w)
         d["screen"] = self._screen_name or None     # 空 = 主屏；只有显式挑过才记名字
         if self._y is not None:
             d["y"] = int(self._y)
@@ -2166,6 +2537,11 @@ class Settings(QtWidgets.QDialog):
         outer.addWidget(self._scroll)
         scr_h = QtGui.QGuiApplication.primaryScreen().availableGeometry().height()
         self.setMaximumHeight(max(560, int(scr_h * 0.9)))
+        # 能自己缩小：一打开就顶到屏高的 90% 的话，矮屏上永远"刚好装下"，
+        # 滚动条永远不出现（用户看到的就是"设置不能滚"）。松开尺寸限制 + 右下角抓手，
+        # 想缩就缩，一缩内容就真的能滚了。
+        self.setSizeGripEnabled(True)
+        self._wheel_kids = []       # 滚轮要转给滚动区的子控件（下拉框会吃掉滚轮）
         p = cfg["providers"]
 
         self.hotkey = SmoothLineEdit(cfg["hotkey"])
@@ -2210,6 +2586,10 @@ class Settings(QtWidgets.QDialog):
         if dock is not None:            # 换屏要立刻看见效果，不等"保存"
             self.dock_screen.currentIndexChanged.connect(
                 lambda _i: dock.set_screen(self.dock_screen.currentData() or ""))
+        # 两个下拉框有焦点时会吃掉滚轮（见 eventFilter）：盯住它们，滚轮一律转给滚动区
+        for cb in (self.engine, self.dock_screen):
+            cb.installEventFilter(self)
+            self._wheel_kids.append(cb)
 
         # 分组：12 行平铺时用户只能一行行扫，不知道哪些是常用的、哪些是填一次就不用管的。
         # 按"什么时候会来改"分成四组，组内顺序不动。
@@ -2252,7 +2632,25 @@ class Settings(QtWidgets.QDialog):
         bb.addButton(cancel, QtWidgets.QDialogButtonBox.ButtonRole.RejectRole)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        f.addRow(bb)
+        # 按钮盒挂在滚动区**外面**当固定页脚：装在里面的话，内容一长就得先滚到底才能
+        # 看到「保存」（矮屏上更是永远在屏幕外）。现在滚动的是表单，按钮一直贴在底部。
+        foot = QtWidgets.QWidget()
+        fv = QtWidgets.QHBoxLayout(foot)
+        fv.setContentsMargins(12, 8, 12, 12)
+        fv.addWidget(bb)
+        outer.addWidget(foot)
+
+    # ---------- 设置窗自己的交互修补 ----------
+    def eventFilter(self, obj, ev):
+        """滚轮落在下拉框上时转给滚动区。
+
+        QComboBox 一旦有焦点就自己吃掉滚轮去改选项 —— 用户在设置里滚页面，
+        结果把「OCR 引擎」从 auto 滚成了 native。转给滚动区视口，滚动语义就正常了。
+        """
+        if ev.type() == QtCore.QEvent.Type.Wheel and obj in self._wheel_kids:
+            QtWidgets.QApplication.sendEvent(self._scroll.viewport(), ev)
+            return True
+        return super().eventFilter(obj, ev)
 
     @staticmethod
     def _sec(title):
@@ -2381,10 +2779,14 @@ class Settings(QtWidgets.QDialog):
         if not getattr(self, "_fit", False):
             # 装了滚动区之后，对话框不会自己按内容撑开（QScrollArea 的 sizeHint 不等于内容高），
             # 首次显示时按内容量一次：够高就全显示，不够就交给滚动。
+            # **但不许顶到 maximumHeight**：顶满的话矮屏上永远"刚好装下"，滚动条永远不出现
+            # （用户看到的就是"设置不能滚"）。夹到可用屏高的 80%，想更大自己拖。
             self._fit = True
+            screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+            avail_h = screen.availableGeometry().height() if screen else 900
             hint = self._wrap.sizeHint()
             self.resize(max(self.minimumWidth(), hint.width() + 20),
-                        min(hint.height() + 20, self.maximumHeight()))
+                        min(hint.height() + 20, int(avail_h * 0.8)))
         self.setWindowOpacity(0.0)
         _anim(self, b"windowOpacity", 0.0, 1.0, DUR["fast"])
 
@@ -2446,6 +2848,7 @@ class App(QtCore.QObject):
         self._esc_thread = None
         self.lookup = None          # GUI 起来之后再建（要读词典文件）
         self.dock = None            # 屏幕右边缘那条常驻面板（run() 里建）
+        self.wb = None              # 记词板（run() 里建；没建起来也不影响查词）
         self.hotkey_fired.connect(self.on_hotkey)
 
     # ---------- 取词入口 ----------
@@ -2644,15 +3047,51 @@ class App(QtCore.QObject):
     def _ensure_card(self, pos=None):
         if self.current and not self.current.pinned:
             return self.current
-        c = Card()
+        c = Card(width=int(self.cfg.get("card_width") or 0))
         c.closed.connect(self._on_card_closed)
         # 绑定 card：结果回发起那一次交互的卡片，而不是"最新那张"（hy4 评审第 3 条）
         c.detail_requested.connect(lambda b, c=c: self._on_detail(c, b))
         c.ask_requested.connect(lambda b, q, e, c=c: self._on_ask(c, b, q, e))
         c.word_clicked.connect(lambda w: self.lookup_text(w))
+        c.save_requested.connect(lambda b, c=c: self._on_save(c, b))
+        c.width_changed.connect(self._on_card_width)
         self.cards.append(c)
         self.current = c
         return c
+
+    def _on_save(self, card, brief):
+        """卡片上的「存词」：一个按钮两个方向 —— 没存过就存，存过再点就取消。"""
+        if self.wb is None or not brief or card is None:
+            return
+        from . import wordbook
+        word = wordbook.key_of(brief)
+        if not word:
+            return
+        if self.wb.has(word):
+            self.wb.remove(word)
+            card.set_saved(False)
+            self._notify("已从记词板删掉：%s" % word, 4000)
+        else:
+            self.wb.add(brief)
+            card.set_saved(True)
+            self._notify("已存到记词板：%s" % word, 4000)
+        if self.dock:
+            self.dock.refresh_wordbook()
+
+    def _on_card_width(self, w):
+        """卡片宽度拖完了：记住它（下次开卡片照这个宽）。"""
+        try:
+            w = int(w)
+        except (TypeError, ValueError):
+            return
+        if w <= 0 or w == self.cfg.get("card_width"):
+            return
+        self.cfg["card_width"] = w
+        try:
+            from . import config
+            config.save(self.cfg)
+        except Exception:
+            traceback.print_exc()      # 存不上不影响使用
 
     def _on_card_closed(self, card):
         if card in self.cards:
@@ -2688,6 +3127,9 @@ class App(QtCore.QObject):
             return
         self._chat_hist = []        # 换词了，之前的追问上下文作废
         card.show_brief(brief, text=text, at=at)
+        if self.wb is not None:
+            from . import wordbook
+            card.set_saved(self.wb.has(wordbook.key_of(brief)))     # 存过的词，按钮直接亮着
         card.btn_detail.setEnabled(True)
         if self.cfg.get("auto_detail") and (brief.get("cn") or brief.get("en")):
             self._on_detail(card, brief)
@@ -2743,6 +3185,13 @@ def run(cfg):
     lookup = Lookup(cfg, dic=Ecdict(cfg["ecdict"]), cache=Cache(cfg["cache"]))
     ctrl = App(cfg)
     ctrl.lookup = lookup
+    # 记词板（存下来的词）。坏掉也不该拖垮整个程序 —— 查词是主功能，本子是附加的。
+    try:
+        from .wordbook import Wordbook
+        ctrl.wb = Wordbook(cfg.get("wordbook") or "")
+    except Exception:
+        traceback.print_exc()
+        ctrl.wb = None
 
     def on_settings():
         old_screen = (cfg.get("dock") or {}).get("screen") or ""
@@ -2787,7 +3236,9 @@ def run(cfg):
 
     dock = Dock(cfg, ctrl.start_pick,
                 lambda t: ctrl.lookup_text(t, at=dock.anchor()),
-                on_clip, on_settings, on_quit)
+                on_clip, on_settings, on_quit,
+                wb=ctrl.wb,
+                on_word=lambda w: ctrl.lookup_text(w, at=dock.anchor()))
     dock.set_hint("热键：%s 框选屏幕。不想记热键就用上面的按钮。" % cfg["hotkey"])
     ctrl.dock = dock
     tray.attach_dock(dock)      # 托盘里能开关面板、换屏、展开收起
@@ -2862,6 +3313,26 @@ def run(cfg):
                 # 定时器抓不到它；这里非模态 show() 出来，_shot 就能 grab。
                 ctrl._dlg_shown = Settings(cfg, dock=dock)
                 ctrl._dlg_shown.show()
+            elif demo == "wordbook":
+                # 记词板的样子：**不碰用户的真记词板**，临时塞一个 scratch 库进去。
+                import tempfile
+                from .wordbook import Wordbook
+                scratch = Wordbook(os.path.join(tempfile.mkdtemp(prefix="snapword-demo-"), "wb.db"))
+                for b in ({"query": "serendipity", "phonetic": "/ˌserənˈdɪpəti/",
+                           "cn": ["n. 意外发现珍奇事物的本领"], "en": ["n. good luck in making discoveries"]},
+                          {"query": "photosynthesis", "phonetic": "/ˌfəʊtəʊˈsɪnθəsɪs/",
+                           "cn": ["n. 光合作用"], "en": ["n. synthesis of compounds with radiant energy"]},
+                          {"query": "ephemeral", "phonetic": "/ɪˈfem(ə)rəl/",
+                           "cn": ["a. 短暂的，转瞬即逝的"], "en": ["a. lasting for a very short time"]}):
+                    scratch.add(b)
+                scratch.set_mastered("photosynthesis", True)
+                if ctrl.dock:
+                    ctrl.dock.wb = scratch
+                    ctrl.dock.refresh_wordbook()
+                    if not ctrl.dock.expanded:
+                        ctrl.dock.toggle()
+                    if not ctrl.dock.wb_open:
+                        ctrl.dock.toggle_wordbook()
             elif demo == "detail":
                 # 点过「详细解释」后的卡：验证详解淡入收尾的视觉（不突兀）
                 ctrl.lookup_text("serendipity")
@@ -2895,7 +3366,7 @@ def run(cfg):
         shot = os.environ.get("SNAPWORD_SHOT")
         if shot:
             def _shot():
-                w = ctrl.dock if demo.startswith("dock") else (
+                w = ctrl.dock if (demo.startswith("dock") or demo == "wordbook") else (
                     ctrl.selector or getattr(ctrl, "_dlg_shown", None) or ctrl.current)
                 if w and ctrl.dock:
                     # 几何只看这里：展开/收起是 180ms 动画，_demo_start 里那会儿还没走完。

@@ -511,7 +511,10 @@ def test_fade_in_passes_over_layouts_instead_of_crashing():
 
 
 def test_detail_button_comes_back_after_the_answer():
-    """hy4 评审第 4 条：详解按钮以前永远停在「生成中…」，成功也一样。"""
+    """hy4 评审第 4 条：详解按钮以前永远停在「生成中…」，成功也一样。
+
+    按钮文案在加「存词」时从「详细解释」收短成「详解」（六个按钮一行放不下），
+    这里跟着改；要验的是"回到能点、且不是生成中"这件事，不是具体文案。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     _qt()
     from snapword.gui import Card
@@ -520,12 +523,12 @@ def test_detail_button_comes_back_after_the_answer():
     c.btn_detail.setText("生成中…")
     c.set_detail("# 详解", None)                    # 成功这条路
     assert c.btn_detail.isEnabled(), "详解回来了按钮还是禁用的"
-    assert c.btn_detail.text() == "详细解释", c.btn_detail.text()
+    assert c.btn_detail.text() == "详解", c.btn_detail.text()
     c.btn_detail.setEnabled(False)
     c.btn_detail.setText("生成中…")
     c.set_detail(None, "模型没返回")                 # 失败这条路也得还原
     assert c.btn_detail.isEnabled(), "失败之后按钮还是禁用的"
-    assert c.btn_detail.text() == "详细解释", c.btn_detail.text()
+    assert c.btn_detail.text() == "详解", c.btn_detail.text()
     c.deleteLater()
 
 

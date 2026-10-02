@@ -74,7 +74,9 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | --- | --- | --- |
 | 按钮 hover/按下/聚焦 | 进入 90ms、离开 150ms（**不对称**：进入要即时，离开要柔和）；按下 50ms 下沉、松开 90ms 回弹 | `SmoothButton` 自绘（QSS 没有 transition，一帧硬切就是"简陋"的来源）：三个 0..1 过渡量 `hov/prs/foc` 走属性动画，每帧按量插值画底/边框/文字；按下时文字下移 1px |
 | 输入框/下拉框聚焦 | 150ms | `SmoothLineEdit` / `SmoothComboBox`：焦点蓝环是自绘叠层淡入，QSS 里**故意没有** `:focus` 规则（会打架） |
-| 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口固定 352 宽**，只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
+| 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口宽度固定**（2026-10-03 起 = 记词板 300 + 面板宽 + 缝 6 + 细边 26，默认 652），只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
+| 记词板开 / 关 | 240ms，OutBack / InCubic | 记词板挂在面板**左侧同一窗口**里，从窗口左缘外 `x=-WB_W` 滑进来（OutBack 的过冲回弹就是"活板门"的手感）。**不 resize 窗口**，理由同上 |
+| 卡片改宽度 | 拖动中实时跟手（不跑动画） | 拖左/右缘 ≤6px 触发：只改 `setFixedWidth` + 重排（`_fit_height`），**没有过渡动画**——动画会让被拖的边滞后于光标 |
 | 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；stagger **必须等 pos 动画 done 再启动** |
 | 卡片关闭 | 150ms，InCubic | 向下 16px 滑出再 hide；**不走 windowOpacity 淡出**（同上，结尾会闪黑） |
 | 卡片长高 | 240ms，OutCubic | `_resize_keep_place`：`SetNoConstraint` 布局 + 只量不设 + 钉 frame 高 + 动画期间钉窗口最大高度 + resizeEvent 自愈（缺一不可，见坑清单） |
@@ -92,9 +94,16 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 - 关闭类动画一律**先动画后 hide**，不要 hide 了再动画（会闪）。
 - 合并连发：`Card._resize_keep_place()` 有 `_resizing` 闸门 + "高度差 < 20px 就跳过"，
   `hide_card()` 有 `_closing` 闸门 —— 动画跑一半被同一个属性上的第二次动画打断会闪。
-- **内容自适应高度**：详解/聊天的高度跟内容走（`document().size()` 按文字区宽 352px 排版，
-  夹在 96/110 下限与屏高 45% 上限之间，超了自己滚）。排版宽度必须扣掉 QSS 的水平 padding
-  （少扣一行就会把末行裁掉，实测）。不给固定 minimum 260——短内容底下空出一大块很简陋。
+- **内容自适应高度**：详解/聊天的高度跟内容走（`document().size()` 按**当前卡片宽**排版 ——
+  `viewport().width()` 拿不到时才退回 `width()-54`，夹在 96/110 下限与屏高 45% 上限之间，
+  超了自己滚）。排版宽度必须扣掉 QSS 的水平 padding（少扣一行就会把末行裁掉，实测）。
+  不给固定 minimum 260——短内容底下空出一大块很简陋。
+- **卡片宽可变、高随内容**（2026-10-03 定）：宽度 360~430 自适应（屏宽的 45%，上限 430），
+  可拖到 `max(360, min(屏宽*0.45, 720))`；拖动后写回 `cfg["card_width"]`，下次弹卡沿用。
+  高度永远由 `_fit_height()` 量出来，**不给卡片固定高度**。
+- **动作按钮行能换行**：底部按钮行是 `FlowLayout`（详见 `_build` 的注释）。430 宽下
+  5 个按钮（详解/问 AI/复制/钉住/✕）= 351px + 间距，可用 376px，正好一行；拖到 360 那档
+  会换成两行而不是把按钮压扁。**「存词」不在这行**——它是词头右上角的 ☆/★。
 
 ## 落实现状（`gui.py`）
 
@@ -102,7 +111,9 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | --- | --- |
 | 令牌 `T` / 时长 `DUR` | `gui.py` 顶部，`QSS = Template(...).substitute(T)` |
 | 投影 `_shadow(w)` | 只给 `Card.frame`（`outer` 留 8/8/8/12 的边距让它画出来）；**Dock 面板不加**——贴屏幕边会被切 |
-| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度在 26 ↔ 352 之间走，panel 的 x 同步从 W 滑到 0；rail 全程贴住窗口右缘（不能用 layout：窗口一变窄 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释） |
+| 面板展开/收起 | `Dock._place()` + `_settle()`：窗口宽度**不变**（= 记词板区 + `_pan_w` + 缝 6 + 细边 26），只滑 panel + 摆 wbpanel；rail 全程贴住窗口右缘（不能用 layout：窗口一变 layout 会把 rail 留在旧坐标上、跑到窗口外，见 `Dock._build` 的注释）。可点区永远是 rail ∪ panel ∪ wbpanel 的**并集**（左边 300px 透明区必须始终裁掉，否则挡住底下的窗口） |
+| 记词板（存词） | 词头 ☆/★ → `Card.save_requested` → `App._on_save` → `Wordbook.add/remove` → `Dock.refresh_wordbook()`；导出 md/csv 在 `Wordbook.export_*`，`Dock._wb_export` 只负责选路径 |
+| 面板宽度可拖 | `Dock.eventFilter` 里的 `self.grip` 分支（面板内侧 6px 抓边），夹在 `PANEL_W_MIN..PANEL_W_MAX`，松手 `_save()` 写回 `dock.panel_w` |
 | 卡片弹出 / 关闭 / 长高 | `Card.show_brief()` / `hide_card()+_really_hide()` / `_resize_keep_place()` |
 | 托盘菜单三项 | `Tray.attach_dock()`（显示常驻面板 / 展开收起 / 面板挂在哪块屏） |
 | 面板展开/收起 + 卡片动画 | `Dock._place()` + `_settle()` / `Card.show_brief()`、`_resize_keep_place()`；2026-09-28 起统一由 `tmp/ui_audit.py` 实跑断言（0 项未过） |
@@ -131,12 +142,13 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 
 | 场景 | 处理 | 在哪 |
 | --- | --- | --- |
-| 超长单词（无空格） | 词头显示宽度上限 260px，超出省略号，完整词进 tooltip | `show_brief` + `#word` |
+| 超长单词（无空格） | 词头显示宽度上限 `max(200, 卡宽-170)`（430 宽时就是原来的 260px，卡拖宽后跟着放宽），超出省略号，完整词进 tooltip | `Card._word_cap()` + `#word` |
 | 长短语的词胶囊 | FlowLayout 换行排，绝不挤压变形；数量上限 12 | `FlowLayout` / `FlowBox` |
 | 超长详解 / 对话 | `detail` / `chat_log` 最大高度 = 可用屏高的 45%，超出自己滚 | `Card._build` |
 | 卡片比可用区域还高 | `_place` 里上下都夹在屏幕内，不给内容掉出屏幕的机会 | `Card._place` |
 | 表单太长 | 设置窗按"基本 / 屏幕识别 / 问答模型 / 进阶"分四组（轻量标题 `#sechead`，不加边框） | `Settings` |
 | 设置窗比屏幕还高 | 装进 `QScrollArea` + 高度夹在可用屏高的 90%；`QScrollArea` 的 sizeHint 不等于内容高，**首次显示要按内容量一次**（否则缩成一小块） | `Settings.showEvent` |
+| 设置窗滚不动（2026-10-03 修） | 两个原因：①**保存/取消按钮在滚动区里面**，一滚就跟着走 —— 已挪到滚动区外当固定页脚（`outer.addWidget(foot)`）；②`showEvent` 按内容量一次高度时顶到 90% 上限，矮屏"刚好装下"、滚动条永远不出现 —— 改成夹 `min(内容高, 可用屏高*0.8)`，并 `setSizeGripEnabled(True)` 让用户还能自己缩；滚轮落在下拉框上会被 QComboBox 吃掉（有焦点时去改选项），用 `eventFilter` 转发给 `_scroll.viewport()` | `Settings.showEvent` / `Settings.eventFilter` |
 
 ## 引导块（onboarding，2026-09-29 定）
 

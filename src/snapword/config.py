@@ -28,6 +28,12 @@ DEFAULTS = {
     "ocr_dir_strong": str(ROOT / "models" / "ppocrv5-server"),
     "ecdict": str(ROOT / "data" / "ecdict.db"),
     "cache": str(ROOT / "data" / "cache.db"),
+    # 记词板：存下来的词（卡片上点「存词」）。跟 cache 分开存 —— cache 是可以随时清掉的
+    # 查询缓存，记词板是用户攒的东西，混在一起早晚会一起被清掉。
+    "wordbook": str(ROOT / "data" / "wordbook.db"),
+    # 卡片宽度：0 = 按屏幕自适应（可用宽的 45%，夹在 360~430）。拖过边之后写回这里，
+    # 下次开卡片就照这个宽度。
+    "card_width": 0,
     # 慢路径要不要自动跑（false = 卡片上按「详细解释」才跑）
     "auto_detail": False,
     # 屏幕右边缘那条常驻小面板：不依赖热键（框选/剪贴板/手输/设置/退出都能点出来）。

@@ -99,10 +99,11 @@ def test_a2_dock_geometry_and_edge():
     wait(300)
     g0 = d.geometry()
     scr = QtGui.QGuiApplication.primaryScreen().availableGeometry()
-    # 窗口**固定 352 宽**（resize 半透明窗口会被 Windows 拿旧 buffer 拉伸一帧 ——
-    # 用户看到的"展开时左侧一闪"就是它）。收起状态下可点区域由 mask 裁成细边那一条，
-    # 透明区不挡鼠标；rail 的屏幕坐标两种状态下都不变。
-    assert d.width() == 352, "窗口应固定 352 宽，实际 %d" % d.width()
+    # 窗口**固定宽度**（resize 半透明窗口会被 Windows 拿旧 buffer 拉伸一帧 ——
+    # 用户看到的"展开时左侧一闪"就是它）= 记词板宽 + 主面板宽 + 缝 + 细边。
+    # 记词板收起时那 300px 是透明的，靠 mask 裁掉，不然会挡住背后的应用。
+    want_w = d.WB_W + d._pan_w + 6 + d.RAIL_W
+    assert d.width() == want_w, "窗口应固定 %d 宽，实际 %d" % (want_w, d.width())
     assert g0.x() + g0.width() == scr.x() + scr.width(), "收起时没贴住屏幕右缘"
     assert not d.mask().isEmpty(), "收起时没设 mask（透明区会挡住背后的应用）"
     rail_screen_x = g0.x() + d.rail.geometry().x()
@@ -110,13 +111,16 @@ def test_a2_dock_geometry_and_edge():
     d.toggle()
     wait(400)
     g1 = d.geometry()
-    assert d.width() == 352, "展开后仍应为 352（不许再 resize），实际 %d" % d.width()
+    assert d.width() == want_w, "展开后仍应为 %d（不许再 resize），实际 %d" % (want_w, d.width())
     assert g1.x() + g1.width() == scr.x() + scr.width(), "展开后没贴住屏幕右缘"
     assert g1.x() + d.rail.geometry().x() == rail_screen_x, \
         "展开后 rail 的屏幕坐标变了（%d → %d）——细边移位" % (
             rail_screen_x, g1.x() + d.rail.geometry().x())
-    assert d.mask().isEmpty(), "展开后 mask 没放开（panel 会被裁掉/点不动）"
-    assert d.panel.isVisible() and d.panel.pos().x() == 0, "展开后 panel 没到位"
+    # mask 现在永远是"按状态逐块裁出来的并集"（展开 + 记词板开着时不能 clearMask，
+    # 窗口左边那 300px 透明区照样吃点击）。所以验的是"面板这一块在可点区里"。
+    px = d.panel.geometry().center().x()
+    assert d.mask().contains(QtCore.QPoint(px, 5)), "展开后 panel 被 mask 裁掉了（点不动）"
+    assert d.panel.isVisible() and d.panel.pos().x() == d.WB_W, "展开后 panel 没到位"
     d.close()
 
 
@@ -554,8 +558,8 @@ def test_b5_dock_toggle_animation():
     wait(40)
     mid = d.panel.pos().x()
     wait(400)
-    assert mid != 0, "面板是瞬间出现的，没有滑出动画"
-    assert d.panel.pos().x() == 0, "动画结束后面板没到位：x=%d" % d.panel.pos().x()
+    assert mid != d.WB_W, "面板是瞬间出现的，没有滑出动画"
+    assert d.panel.pos().x() == d.WB_W, "动画结束后面板没到位：x=%d" % d.panel.pos().x()
     d.close()
 
 
