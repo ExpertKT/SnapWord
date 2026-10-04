@@ -257,8 +257,9 @@ class Lookup:
         out, src, who, why = None, None, None, ""
         for call, prov, src, who in tries:
             try:
-                # 免费通道两家各 45 秒（它们挂住时是一个字节都不吐）；最坏加起来仍在一分钟出头
-                out = call(prov, msgs, timeout=45 if src in providers.FREE_ORDER else 60)
+                # 免费通道给 60 秒：kilo 实测 2~21 秒能回，但抽风时会把 45 秒耗光（那时候它就
+                # 不是"快"的问题了）；两家各 60 秒，最坏也比对着"正在整理…"干等几分钟短。
+                out = call(prov, msgs, timeout=60)
                 break
             except Exception as ex:
                 out, why = None, who + "没答上：" + str(ex)[:120]
@@ -327,9 +328,9 @@ class Lookup:
                 try:
                     # 免费云端是公共端点，会直接挂住不吐字（实测 pollinations 后端 ENOSPC
                     # 时就这样），所以不给它和"自家 key / 本机模型"一样长的绳子；
-                    # 一家挂了（限流/抽风）就换下一家，这正是排两家免费通道的意义 ——
-                    # 45 秒 × 最多两家，最坏也比"对着正在整理…干等"短。
-                    text, src = providers.free_chat(name, prov, msgs, timeout=45), name
+                    # 一家挂了（限流/抽风/超时）就换下一家，这正是排两家免费通道的意义。
+                    # 60 秒是"kilo 正常只要 2~21 秒，但偶尔会因为排队把这 60 秒耗光"取的值。
+                    text, src = providers.free_chat(name, prov, msgs, timeout=60), name
                     break
                 except Exception as ex:
                     why = "免费云端（%s）没答上：" % name + str(ex)[:80]

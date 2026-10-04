@@ -332,9 +332,10 @@ GUI 里有「设置…」，最后三格都能在界面里改（那两格免费�
 - 崩了/卡片不出来：看 `data\snapword.log`。pythonw 启动时没有控制台，所以启动那行、
   未捕获异常、QThread 里的异常都写到那儿（启动器里已经装好这个钩子了）。
 - 词形还原是后缀规则拼的，不是词典反查；查不到原形时靠模型兜底。
-- 免费云端（kilo / pollinations）都是公共端点：**别指望它快，也别指望它永远在**。要稳就填自己的 key
-  （见上面的 `providers`），或者本机跑 Ollama。它答得不好时，卡片上那句来源会写明是哪条免费通道
-  —— 不会冒充"精品解释"。
+- 免费云端（kilo / pollinations）都是公共端点：**别指望它快，也别指望它永远在** —— kilo 实测
+  两三秒到二十秒能回（抽风时会耗满 60 秒超时，然后自动换另一家），pollinations 更不稳。
+  要稳就填自己的 key（见上面的 `providers`），或者本机跑 Ollama。它答得不好时，卡片上那句来源
+  会写明是哪条免费通道 —— 不会冒充"精品解释"。
 - 卡片弹出时 Qt 会往 stderr 打一行 `QWindowsWindow::setGeometry: Unable to set geometry ...`
   的警告（无边框 + 半透明背景的取整问题），不影响显示；用 pythonw 启动时看不到。
 - 卡片和常驻面板是**分层窗口**（`WA_TranslucentBackground`），所以**截图工具/`grabWindow(0)`

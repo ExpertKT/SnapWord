@@ -1408,10 +1408,10 @@ class Card(QtWidgets.QWidget):
         # 不判 btn_detail.isEnabled()：按下去那一刻就把它禁用了，那样第一个 tick 就自杀。
         # 收尾由 set_detail / _on_job_fail 负责停表；卡片没了这个 QTimer 跟着一起销毁。
         n = int(time.monotonic() - self._detail_t0)
-        tip = "正在整理…（本地模型冷启动要十几秒；免费云端一般几秒）"
+        tip = "正在整理…（本地模型冷启动要十几秒；免费云端十几秒）"
         if n >= 3:
             tip = ("正在整理…已经 %d 秒。\n\n词典释义在上面；模型那部分本地 9B 冷启动"
-                   "要十几秒，免费云端和联网模型快一些。" % n)
+                   "要十几秒，免费云端十几秒、偶尔更久。" % n)
         self.detail.show()
         self.detail.setPlainText(tip)
 
@@ -3915,7 +3915,7 @@ class App(QtCore.QObject):
         card.btn_detail.setEnabled(False)
         card.start_detail_wait()            # 按钮上数秒：冷启动十几秒也看得见它在动
         card.detail.show()
-        card.detail.setPlainText("正在整理…（本地模型冷启动要十几秒；免费云端一般几秒）")
+        card.detail.setPlainText("正在整理…（本地模型冷启动要十几秒；免费云端十几秒）")
         card._resize_keep_place()
         self._run(self._lookup_detail, brief, card=card)
 
