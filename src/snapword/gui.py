@@ -2223,10 +2223,11 @@ class HingeFoldTransition(QtWidgets.QWidget):
     """Reusable single-leaf hinge transition with a fixed edge hinge.
 
     The supplied pixmap is the leaf itself — it carries the panel snapshot, so
-    the panel must be hidden while the transition runs. progress 1 is the flat
-    leaf sitting exactly where the real panel will return; progress 0 is the
-    leaf standing edge-on (zero projected area, nothing drawn). SnapWord uses a
-    right-edge hinge because its main panel sits immediately to the right.
+    the panel must be hidden while the transition runs. ``progress`` is how far
+    the leaf has stood up: 0 is the flat leaf sitting exactly where the real
+    panel will return, 1 is edge-on at the hinge (zero projected area, nothing
+    drawn). SnapWord uses a right-edge hinge because its main panel sits
+    immediately to the right.
     """
 
     # 快门采样数：12 个姿态才让拖尾读起来是连续的（8 个时还能看出并列的"叠影"）。
@@ -2322,15 +2323,17 @@ class HingeFoldTransition(QtWidgets.QWidget):
         value = max(0.0, min(1.0, float(progress)))
         self._delta = value - self._progress
         self._progress = value
-        # 残影只画在"立起来"（收起）方向：ghost 是过去几帧的盖子姿态，由老到新、越新越淡
-        # 地叠在当前盖子位置上，读起来就是盖子的运动拖尾；展开时 past 姿态更折叠、范围更小，
-        # 整块落在当前盖子**里面**，叠上去只会把当前画面冲淡，白费十几次透视重采样。
+        # 残影只画在"收起"（progress 涨、叶子往铰链边立起来）方向：ghost 是过去几帧的
+        # 叶子姿态，由老到新、越新越淡地叠在当前叶子上，读起来就是叶子的运动拖尾；
+        # 展开时过去的姿态更折叠、范围更小，整块落在当前叶子**里面**，叠上去只会把当前
+        # 画面冲淡，白费十几次透视重采样。
         # 强度**只看瞬时速度**（每帧位移 |Δprogress|），不套 sin(πp) 那种固定包络：
-        # 收起用 InCubic，最快的一帧在 p→0 那一头，包络会正好把模糊掐在最需要它的地方，
-        # 观感就成了"该糊的地方不糊"。速度本身由缓动曲线给出，端点速度=0，模糊自然归零。
+        # 收起用 InCubic，最快的一帧在末尾（叶子快立起来时），包络会正好把模糊掐在最需要
+        # 它的地方，观感就成了"该糊的地方不糊"。速度本身由缓动曲线给出，端点速度=0，
+        # 模糊自然归零。
         self._velocity = abs(self._delta)
         self._blur_strength = (min(1.0, self._velocity * 80.0)
-                               if self.blurAmount > 0.0 and self._delta < 0.0 else 0.0)
+                               if self.blurAmount > 0.0 and self._delta > 0.0 else 0.0)
         if value <= 0.0 or value >= 1.0:
             self._delta = 0.0
             self._velocity = 0.0
@@ -2385,8 +2388,8 @@ class HingeFoldTransition(QtWidgets.QWidget):
         return QtCore.QPointF(screen_x, screen_y)
 
     def _angle_for_progress(self, progress):
-        """`progress` = 记词板开了多少：1 = 全开（盖子绕右缘立起来、投影≈0），
-        0 = 合上（盖子摊平盖满整块）。展开动画 p 由 0 涨到 1，角度跟着涨。"""
+        """`progress` = 叶子立起来的程度：1 = 立到铰链边（投影≈0，什么都看不见），
+        0 = 摊平盖满整块。展开动画 p 由 1 降到 0，角度跟着降。"""
         return self.maxAngle * max(0.0, min(1.0, float(progress)))
 
     def _free_edge_x(self, progress):
@@ -2454,8 +2457,8 @@ class HingeFoldTransition(QtWidgets.QWidget):
         """
         if self._blur_strength <= 0.0 or self.blurAmount <= 0.0 or self.blurFrames <= 0.0:
             return 0.0, 1.0
-        # 残影留在运动的**后方**（p 往前走，身后的姿态是来路）：收起时 delta<0，
-        # 来路的 p 更大 = 更摊平 = 自由边更靠左，于是拖尾铺在叶子左外侧；展开时镜像。
+        # 残影留在运动的**后方**（p 往前走，身后的姿态是来路）：收起时 delta>0，
+        # 来路的 p 更小 = 更摊平 = 自由边更靠左，于是拖尾铺在叶子左外侧；展开时镜像。
         back = -1.0 if self._delta > 0.0 else 1.0
         span = self._velocity * self.blurFrames
         if self.blurMaxPx > 0.0:
@@ -2515,9 +2518,12 @@ class HingeFoldTransition(QtWidgets.QWidget):
             # 摊平端点（progress>=1）走的是整像素 drawImage，AA 不改变结果，
             # 这条由 test_b5_wordbook_leaf_matches_real_panel_at_handoff 逐像素锁着。
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            # 内容层：记词板快照原样平铺，全程不动、不变形、不加任何滤镜 ——
-            # 动画里的板面因此和动画外的板面逐像素一致（用户报的"动画里暗几个度"）。
-            painter.drawImage(0, 0, self._pix.toImage())
+            # 单层模式（叶子就是记词板快照本身）：不要再平铺一份内容层，否则动画里
+            # 会看到"平铺的正常板面 + 上面压着一块压扁的板面"两层重影。
+            # 两层模式（另给了一张封面 `lid`）才需要平铺内容层——那是后来被用户否决
+            # 的空壳封面设计，代码留在这里只是不让 `start(pix, p, lid)` 的调用方炸。
+            if self._lid is not self._pix:
+                painter.drawImage(0, 0, self._pix.toImage())
             if self._progress <= 0.0:
                 # 合上：盖子摊平、像素精确地盖满整块（不投影，免得边缘糊一圈）。
                 painter.drawImage(0, 0, self._lid.toImage())
@@ -2578,7 +2584,6 @@ class Dock(QtWidgets.QWidget):
     PANEL_H = 300
     EDGE_GAP = 0            # 贴死屏幕右边缘（留缝会被看成"没贴边"）
     WB_W = 300              # 记词板（挂在主面板左边，自己一扇"活板门"）
-    WB_FOOTER_H = 48        # 记词板底栏（三个按钮）大概占的高度：做封面时要用
     PANEL_W_MIN = 260       # 主面板宽度可拖：下限（再窄按钮会挤破）
     PANEL_W_MAX = 460       # 上限（再宽会盖住屏幕里太多东西）
 
@@ -2766,6 +2771,24 @@ class Dock(QtWidgets.QWidget):
         self.lb_hint.setText(text)
 
     # ---------- 记词板 ----------
+    def _leaf_path(self):
+        """记词板叶子（= 记词板快照）的轮廓：左两个角 8px 圆角、右两个角方角。
+
+        和 `#wbpanel` 的 QSS 一致（gui.py:606-608）—— 记录板是窗口最左边那一扇，
+        圆角由它出；右侧贴着主面板，不要圆角。逻辑坐标，DPR 由 pixmap 自己带。
+        """
+        path = QtGui.QPainterPath()
+        w, h, r = float(self.WB_W), float(self.PANEL_H), 8.0
+        path.moveTo(r, 0.0)
+        path.lineTo(w, 0.0)
+        path.lineTo(w, h)
+        path.lineTo(r, h)
+        path.arcTo(0.0, h - 2 * r, 2 * r, 2 * r, 270.0, -90.0)     # 左下
+        path.lineTo(0.0, r)
+        path.arcTo(0.0, 0.0, 2 * r, 2 * r, 180.0, -90.0)           # 左上
+        path.closeSubpath()
+        return path
+
     def toggle_wordbook(self, open_state=None, after=None):
         """「活板门」：记词板是窗口最左边那一扇，打开是"盖子展开"，关闭是"盖子收起来"。
 
@@ -2788,11 +2811,11 @@ class Dock(QtWidgets.QWidget):
         self.wb_open = target_open
         self.refresh_wordbook()
         self.wbpanel.move(0, 0)
-        # 两层：**内容层** = 记词板本身（快照原样平铺，全程清晰、不压扁、不加滤镜），
-        # **盖子层** = 一块"合上的封面"（标题条 + 底色，列表主体与底栏是空的），展开时
-        # 它绕右缘掀开、内容一块块露出来，收起时它压回摊平把内容盖住。两层在自己矩形里
-        # 都铺满像素，所以这块控件永远不透明 —— 不用再靠清透明去盖 backing store 的旧
-        # 像素（用户 m11223 的"进动画前闪过什么"）。
+        # 叶子（= 记词板快照本身，单层）绕右缘铰链翻转：展开时它从铰链边甩出来、摊平
+        # 落位；收起时整块掀回铰链边。动画期间真实面板退场，所以投影四边形以外就是窗口
+        # 底色 —— 这就是用户 10-04 16:28 指着说"对就是这个"的那版观感。95086f4 之后
+        # 加过一版"空壳封面 + 内容层"（`_make_wb_lid`，封面主体是空的），被用户否决：
+        # "动画里的记词板和实际的不一样"。所以叶子 carry 的就该是记词板本身。
         #
         # 必须先 show 再拍：`QWidget.render()` 只对"曾被显示过"的控件有效，从没 show 过的
         # 面板渲染出来是一块空板（实测 15625/15625 采样点全不一样；就是用户报过的
@@ -2810,16 +2833,25 @@ class Dock(QtWidgets.QWidget):
         leaf = QtGui.QPixmap(int(round(self.WB_W * ratio)), int(round(self.PANEL_H * ratio)))
         leaf.setDevicePixelRatio(ratio)
         leaf.fill(QtCore.Qt.GlobalColor.transparent)
-        self.wbpanel.render(leaf)
-        lid = self._make_wb_lid(leaf)
+        # 记词板左两个角在 QSS（#wbpanel，见 gui.py:606-608）里是 8px 圆角，可
+        # `render()` 只按矩形出图：叶子摊平时会把窗口左上角那块透明补成实心方角，
+        # 稳态的圆角在动画里就没了（用户："动画里会变成方角"）。按同一条形状裁一次。
+        painter = QtGui.QPainter(leaf)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setClipPath(self._leaf_path())
+        self.wbpanel.render(painter, QtCore.QPoint(0, 0))
+        painter.end()
         self.wbpanel.hide()
-        self._wb_fold.start(leaf, self._wb_reveal / float(self.WB_W), lid)
+        # progress = 叶子立起来的程度：1.0 = 立到铰链边上（投影≈0，什么都看不见）、
+        # 0.0 = 完全摊平。所以展开起点是 1.0（叶子还没甩出来），终点是 0.0；收起反过来。
+        self._wb_fold.start(leaf, 1.0 - self._wb_reveal / float(self.WB_W))
         self._wb_fold.raise_()
-        # 这里 `repaint()` 是为了让 p=0 的那一帧（盖满的封面 + 平铺的内容）在窗口 mask
-        # 放开**之前**同步落进 backing store。反过来 mask 一变大，Windows 先把那块刚 show
-        # 出来拍快照的记词板合成出来 —— 用户 m11223 的"闪过什么东西 / 突然变暗"。
+        # 这里 `repaint()` 是为了让刚开始的那一帧（叶子还立在铰链边、几乎看不见）在窗口
+        # mask 放开**之前**同步落进 backing store。反过来 mask 一变大，Windows 先把那块刚
+        # show 出来拍快照的记词板合成出来 —— 用户 m11223 的"闪过什么东西 / 突然变暗"。
         self._wb_fold.repaint()
-        # 过渡期间这块矩形全在窗口 mask 里（两层画面都铺满，没有"叶子之外"）。
+        # 过渡期间这块矩形整个都在窗口 mask 里。单层模式下叶子之外是窗口底色（透明的、
+        # 露出桌面），不再靠"两层都铺满"来保证不透明。
         self.setMask(QtGui.QRegion(0, 0, self.width(), self.height()))
         _stop_anims(self.wbpanel, b"pos")       # 旧版留下过的位移动画：别让两层动画打架
         a = QtCore.QVariantAnimation(self)
@@ -2838,43 +2870,13 @@ class Dock(QtWidgets.QWidget):
         a.start()
         self._save()
 
-    def _make_wb_lid(self, leaf):
-        """从记词板快照里做一张"合上的封面"：底色 + 顶栏标题条，列表主体与底栏是空的。
-
-        挖洞的位置直接取控件几何（`wb_scroll` 顶边往上留标题，底栏往上留三个按钮），
-        以后调面板布局封面自动跟着变。文字是照抄快照上的像素 —— 不重新排版，省得
-        字号 / DPI 对不上。
-        """
-        ratio = leaf.devicePixelRatio() or 1.0
-        lid = QtGui.QPixmap(leaf.size())
-        lid.setDevicePixelRatio(ratio)
-        lid.fill(QtGui.QColor(T["surface"]))
-        painter = QtGui.QPainter(lid)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        try:
-            head_bottom = self.wb_scroll.geometry().top()
-            if head_bottom <= 0:                # 布局还没跑过：退回一个保守的标题条高度
-                head_bottom = int(round(52 * ratio))
-            head_bottom = max(1, int(round(head_bottom * ratio)))
-            painter.drawPixmap(QtCore.QRect(0, 0, lid.width(), head_bottom),
-                               leaf, QtCore.QRect(0, 0, leaf.width(), head_bottom))
-            footer_top = int(round((self.PANEL_H - self.WB_FOOTER_H) * ratio))
-            if footer_top > head_bottom:
-                painter.drawPixmap(QtCore.QRect(0, footer_top, lid.width(),
-                                                leaf.height() - footer_top),
-                                   leaf, QtCore.QRect(0, footer_top, leaf.width(),
-                                                      leaf.height() - footer_top))
-        finally:
-            painter.end()
-        return lid
-
     def _set_wb_reveal(self, v):
         # During motion the real panel stays mounted under the cover. Do not
         # mutate the child mask per frame: layered Windows windows can repaint
         # the old region after the new one, producing the reported flashing.
         self._wb_reveal = max(0.0, min(float(self.WB_W), float(v)))
         if hasattr(self, "_wb_fold"):
-            self._wb_fold.set_progress(self._wb_reveal / float(self.WB_W))
+            self._wb_fold.set_progress(1.0 - self._wb_reveal / float(self.WB_W))
 
     def _clip_wordbook(self):
         """把抽屉裁到"已掀开的那条"（`[WB_W-r, WB_W)`）。
@@ -3150,15 +3152,14 @@ class Dock(QtWidgets.QWidget):
         self.wbpanel.move(0, 0)                 # 抽屉位置恒定，露多少由 mask 决定
         self.wbpanel.setVisible(self.wb_open)
         if hasattr(self, "_wb_fold"):
-            self._wb_fold.set_progress(1.0 if self.wb_open else 0.0)
-            if self.wb_open or not self._wb_fold.is_armed():
-                # 全开：盖子立起来了、看不见，把这块交回真实面板；还没拍过快照也别显示
-                # （从没 show 过的记词板渲染出来是空板，露出来就是一块空底）。
-                self._wb_fold.hide()
-            else:
-                # 合上：摊平的封面要一直留在那儿把记词板盖住 —— 这就是"关着"的样子。
-                self._wb_fold.show()
-                self._wb_fold.raise_()
+            self._wb_fold.set_progress(0.0 if self.wb_open else 1.0)
+            # 稳态一律把折页藏起来，什么都不留：
+            #  · 全开：p=0（叶子摊平）但那一块已经交回真实面板，折页留着会盖住面板；
+            #  · 合上：p=1（叶子立在铰链边，画面上本来什么都看不见），可**只要还 show 着
+            #    就吃鼠标和滚动** —— 用户 m12547 报的"严重bug / 桌面行为不对"就是合上后
+            #    这块被一层看不见的封面挡住（95086f4 之后的两层版甚至会在那儿留一块摊平的
+            #    空壳封面）。所以这里不留任何"关着的样子"。
+            self._wb_fold.hide()
         self._wb_reveal = float(self.WB_W if self.wb_open else 0)
         self._clip_wordbook()
         self._apply_mask()

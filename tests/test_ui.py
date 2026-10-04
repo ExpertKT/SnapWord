@@ -1083,11 +1083,15 @@ def test_b5_short_card_drag_height_gives_blank_not_a_dead_edge():
 
 
 def test_b5_fold_unarmed_paints_nothing_and_armed_paints_two_opaque_layers():
-    """没 start() 过就一像素都不画；start() 过以后整块矩形都不许有透明/旧像素。
+    """没 start() 过就一像素都不画；start() 后画的**就是记词板快照本身**（单层）。
 
-    用户 m11485 报过"动画开始时的遮挡变成了完全透明，连内容也一起透明" —— 修法是两层：
-    内容层（记词板快照，原样平铺）+ 盖子层（封面，按投影四边形翻转）。两层都铺满自己的
-    矩形，所以这块控件永远不透明；反过来，没 `start()` 过的空控件不该擦掉底下的兄弟控件。
+    名称沿用旧名（旧设计是"内容层平铺 + 空壳封面层"两层，用户已明确否决）。用户确认的
+    单层语义（参考图 025_1004_162838__fold_frames.png）：
+    - 未 start()：空控件，不许擦掉底下的兄弟控件（否则动画开始前先闪一块）；
+    - p=0 摊平：整块就是那张快照，处处不透明；
+    - 0<p<1 绕右铰链斜过去：只有投影四边形可见且不透明，自由边左边**什么都没有**（透明）
+      —— 这正是"板子立起来、后面能看到桌面"的 3D 观感，不是旧版"左边平铺内容层"；
+    - p=1 立到铰链边：投影≈0，整块透明、什么都不画。
     """
     app()
     host = QtWidgets.QWidget()
@@ -1109,33 +1113,57 @@ def test_b5_fold_unarmed_paints_nothing_and_armed_paints_two_opaque_layers():
         ratio = image.devicePixelRatio()
         assert image.pixelColor(int(150 * ratio), int(150 * ratio)) == QtGui.QColor('red'), \
             "没 start() 过的空翻盖控件不该擦掉底下的东西"
-        # ② start() 之后：两层铺满，任意进度、任意位置都得是不透明的记词板画面。
-        leaf = QtGui.QPixmap(300, 300)
-        leaf.fill(QtGui.QColor(gui.T["surface"]))
-        fold.start(leaf, 0.0)
-        for progress in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
+
+        def render(progress):
             fold.set_progress(progress)
+            fold.set_progress(progress)          # Δ=0 → 清晰帧
             target = QtGui.QImage(300, 300, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
             target.fill(QtCore.Qt.GlobalColor.transparent)
             fold.render(target)
-            for x, y in ((2, 150), (150, 150), (298, 150)):
-                assert target.pixelColor(x, y).alpha() == 255, \
-                    "progress=%s 时 (x=%d, y=%d) 还是透明的＝动画里能透出桌面" % (progress, x, y)
+            return target
+
+        # ② start() 之后：叶子＝记词板快照本身。
+        leaf = QtGui.QPixmap(300, 300)
+        leaf.fill(QtGui.QColor(gui.T["surface"]))
+        fold.start(leaf, 0.0)
+        flat = render(0.0)
+        for x, y in ((2, 150), (150, 150), (298, 150)):
+            assert flat.pixelColor(x, y).alpha() == 255, \
+                "p=0 摊平端点该处处不透明，(x=%d, y=%d) alpha=%d" \
+                % (x, y, flat.pixelColor(x, y).alpha())
+        for progress in (0.2, 0.4, 0.6, 0.8):     # 铰链侧不透明、自由边左边透明
+            target = render(progress)
+            edge = int(round(fold._free_edge_x(progress)))
+            assert 20 < edge < 290, "自由边位置不合理：progress=%s edge=%s" % (progress, edge)
+            assert target.pixelColor(298, 150).alpha() == 255, \
+                "progress=%s 贴铰链侧该不透明" % progress
+            assert target.pixelColor(edge - 8, 150).alpha() == 0, \
+                "progress=%s 自由边左边该是空的（单层，没有内容层垫底）" % progress
+        # ③ p=1 立到铰链边：整块透明，什么都不画。
+        upright = render(1.0)
+        for x, y in ((2, 150), (150, 150), (298, 150)):
+            assert upright.pixelColor(x, y).alpha() == 0, \
+                "p=1 立到铰链边该什么都不画，(x=%d, y=%d) alpha=%d" \
+                % (x, y, upright.pixelColor(x, y).alpha())
     finally:
         host.close()
 
 
 def test_b5_wordbook_right_hinge_projects_head_on():
+    """右铰链投影几何：铰链边（x=WB_W）像素不同，自由边随 p 从左边一路收到右边。
+
+    旧版用"红内容层 + 蓝盖子层"区分两层、断言自由边左边是原样平铺的内容层。用户确认
+    单层后叶片本身就是记词板快照，内容层不存在了，所以这里直接验单层：铰链侧不透明、
+    自由边左边透明（板子斜过去后露出的空档）。
+    """
     app()
     d = gui.Dock({'dock': {'expanded': True}}, lambda: None, lambda t: None,
                  lambda: None, lambda: None, lambda: None)
     f = d._wb_fold
     assert f.direction == 'horizontal' and f.duration == 620
-    content = QtGui.QPixmap(300, 300)          # 内容层画红
-    content.fill(QtGui.QColor('red'))
-    lid = QtGui.QPixmap(300, 300)              # 盖子层画蓝：两层各是谁一眼可辨
-    lid.fill(QtGui.QColor('blue'))
-    f.start(content, 0.0, lid)
+    leaf = QtGui.QPixmap(300, 300)              # 叶片＝记词板快照，画蓝
+    leaf.fill(QtGui.QColor('blue'))
+    f.start(leaf, 0.0)
     positions = []
     tops = []
     bottoms = []
@@ -1159,22 +1187,22 @@ def test_b5_wordbook_right_hinge_projects_head_on():
             % (progress, top, bottom)
         assert 0 <= top <= 300 and 0 <= bottom <= 300, \
             "平视下叶片不该跑出板面：progress=%s top=%.1f bottom=%.1f" % (progress, top, bottom)
-    # 两层的分工：自由边右边是盖子，左边是**原样平铺**的内容 —— 内容不随盖子压扁，
-    # 也不再有任何"左沿贴一条阴影"的通高光带（那条整条删了）。
+    # 单层语义：叶片投影的右边贴铰链、不透明；自由边左边是空的（透明）—— 板子绕右铰链
+    # 斜过去，后面没有任何垫底的内容层。
     for progress in (0.15, 0.3, 0.5, 0.7, 0.85):
         f.set_progress(progress)
+        f.set_progress(progress)            # Δ=0 → 清晰帧，不带收起 ghost
         image = QtGui.QImage(300, 300, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QtCore.Qt.GlobalColor.transparent)
         f.render(image)
-        edge = int(round(f._project_point(
-            0, 150, 300, 300, f._angle_for_progress(progress)).x()))
+        edge = int(round(f._free_edge_x(progress)))
         assert 12 < edge < 288, '取样点选得离自由边太近：progress=%s edge=%s' % (progress, edge)
         assert image.pixelColor(edge + 6, 150) == QtGui.QColor('blue'), \
-            "自由边右边该是盖子层的投影：progress=%s" % progress
-        assert image.pixelColor(edge - 8, 150) == QtGui.QColor('red'), \
-            "自由边左边该是原样平铺的内容层：progress=%s" % progress
-        assert image.pixelColor(2, 150) == QtGui.QColor('red'), \
-            "最左边该一路露到内容层（内容不跟盖子走）：progress=%s" % progress
+            "自由边右边该是叶片的投影：progress=%s" % progress
+        assert image.pixelColor(edge - 8, 150).alpha() == 0, \
+            "自由边左边该是空的（单层，没有内容层垫底）：progress=%s" % progress
+        assert image.pixelColor(298, 150) == QtGui.QColor('blue'), \
+            "贴铰链侧该一路不透明：progress=%s" % progress
     d.close()
 
 
@@ -1184,16 +1212,16 @@ def test_b5_wordbook_fold_blurs_cover_and_reveals_fixed_content():
     d = gui.Dock(cfg, lambda: None, lambda t: None, lambda: None, lambda: None, lambda: None)
     d.show()
     wait(50)
-    # 记词板过渡只在收起方向画 ghost（见 set_progress 的方向闸门），这里单独
-    # 用裸渲染器锁 ghost 的像素契约：收起 = 拖影落在自由边外，看得见。
+    # 记词板过渡只在收起方向画 ghost（见 set_progress 的方向闸门：progress 涨＝收起），
+    # 这里单独用裸渲染器锁 ghost 的像素契约与两个端点。
     fold = gui.HingeFoldTransition()
     source = QtGui.QPixmap(d.WB_W, d.PANEL_H)
     source.fill(QtGui.QColor(gui.T["surface"]))
     fold.start(source, 0.0)
     assert fold._pix.size() == d.wbpanel.size()
-    cover = fold._pix.toImage()
-    assert all(cover.pixelColor(x, 150).alpha() > 200
-               for x in (10, 80, 150, 240, 290)), "折叠盖子为空或透明"
+    snap = fold._pix.toImage()
+    assert all(snap.pixelColor(x, 150).alpha() > 200
+               for x in (10, 80, 150, 240, 290)), "折叠叶子为空或透明"
 
     def frame():
         target = QtGui.QImage(d.WB_W, d.PANEL_H, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
@@ -1201,41 +1229,43 @@ def test_b5_wordbook_fold_blurs_cover_and_reveals_fixed_content():
         fold.render(target)
         return target
 
-    fold.set_progress(0.42)
-    fold.set_progress(0.30)          # 收起方向：拖影落在叶片前方，才看得见
+    fold.set_progress(0.30)
+    fold.set_progress(0.42)          # 收起方向（progress 涨）：拖影才画得出来
     moving = frame()
     assert fold._blur_strength > 0.0, "通用渲染器应保留可选运动 ghost"
-    fold.set_progress(0.30)
+    fold.set_progress(0.42)
     sharp = frame()
     assert fold._blur_strength == 0.0
     assert any(moving.pixel(x, 150) != sharp.pixel(x, 150)
                for x in range(30, d.WB_W - 30)), "铰链姿态没有随进度绘制"
 
-    fold.set_progress(1.0)
-    opened = frame()
+    fold.set_progress(1.0)           # 立到铰链边：投影≈0，整块透明
+    upright = frame()
     assert fold._blur_strength == 0.0
-    assert all(opened.pixel(x, y) == cover.pixel(x, y)
+    assert all(upright.pixelColor(x, y).alpha() == 0
                for x, y in ((0, 0), (40, 150), (150, 150), (299, 299))), \
-        "摊平端点不是像素稳定的平铺画面"
+        "立到铰链边该什么都不画（不是旧版的摊平封面）"
 
-    fold.set_progress(0.0)
-    closed = frame()
+    fold.set_progress(0.0)           # 摊平端点 = 记词板快照本身
+    flat = frame()
     assert fold._blur_strength == 0.0
-    assert all(closed.pixel(x, y) == cover.pixel(x, y)
+    assert all(flat.pixel(x, y) == snap.pixel(x, y)
                for x, y in ((0, 0), (40, 150), (150, 150), (299, 299))), \
-        "合上端点 = 摊平的盖子盖满整块（不许是透明空档，用户 m11485 报的就是这个）"
+        "摊平端点必须逐像素等于记词板快照（交接时刻的保真）"
     d.close()
 
 
 def test_b5_wordbook_closing_blur_scales_with_speed():
     """收起方向的运动模糊必须跟**瞬时速度**走，不是固定比例。
 
-    用户 m10767：「没有非线性的动态模糊，动画观感很差」。真实收起是 620ms 的 InCubic：
-    起步速度≈0、p→0 那一帧最快，所以糊动必须前面几乎没有、结尾最明显。旧实现按固定比例
-    取 3 个姿态、强度再乘 sin(πp)，每个速度都糊一样的量，还把最该糊的结尾掐掉。
+    用户 m10767：「没有非线性的动态模糊，动画观感很差」。新语义下收起 = progress 从 0 涨到
+    1，真实 620ms 套 InCubic（`_wb_reveal = WB_W*(1-t^3)`）→ **p = t^3**：起步慢、结尾最快。
+    所以糊动必须起步那一帧几乎为零、收尾最明显。旧版按固定比例取 3 个姿态、强度再乘
+    sin(πp)，每个速度糊一样的量。
 
-    这里量的是**平均值**：相对同一姿态的静止帧，y=150 这一行的平均通道差。它同时含了
-    "糊得多宽"和"糊得多浓"，而这两者都只该由速度决定。
+    这里量的是**足迹归一化**的平均通道差：相对同一姿态的静止帧，只统计静止帧里 alpha=255
+    的像素（即叶子自己在屏幕上的footprint）再平均。投影面积随 p 收缩，如果像旧版那样对整行
+    y=150 平均，面积一缩这个值就假性下降，反而量不出速度——所以必须按 footprint 归一化。
     """
     app()
     fold = gui.HingeFoldTransition()
@@ -1265,31 +1295,37 @@ def test_b5_wordbook_closing_blur_scales_with_speed():
         sharp = frame(progress)
         moved = frame(progress, previous)
         total = 0
-        for x in range(300):
-            a = sharp.pixelColor(x, 150)
-            b = moved.pixelColor(x, 150)
-            total += (abs(a.red() - b.red()) + abs(a.green() - b.green())
-                      + abs(a.blue() - b.blue()))
-        return total / 300.0
+        covered = 0
+        for y in range(24, 300, 40):
+            for x in range(300):
+                a = sharp.pixelColor(x, y)
+                if a.alpha() < 255:          # 只统计叶子自己的足迹，别让面积收缩稀释平均值
+                    continue
+                b = moved.pixelColor(x, y)
+                total += (abs(a.red() - b.red()) + abs(a.green() - b.green())
+                          + abs(a.blue() - b.blue()))
+                covered += 1
+        return total / float(covered) if covered else 0.0
 
-    # 按真实收起轨迹逐帧走：_wb_reveal 从 WB_W 到 0 套 InCubic，所以 p = 1 - t^3。
+    # 按真实收起轨迹逐帧走：progress 从 0 涨到 1，套 InCubic → p = t^3。
     frames = 37                                 # 620ms @ 60fps
     samples = []
-    previous = 1.0
+    previous = 0.0
     for index in range(1, frames + 1):
-        progress = max(0.0, 1.0 - (index / float(frames)) ** 3)
+        progress = max(0.0, min(1.0, (index / float(frames)) ** 3))
         samples.append((progress, abs(progress - previous), blur(progress, previous)))
         previous = progress
 
-    early = [item for item in samples if 0.97 < item[0] < 0.995][-1]
-    late = [item for item in samples if 0.05 < item[0] < 0.12][-1]
-    assert early[1] < late[1], "取样点没取在起步/收尾两端：%s %s" % (early, late)
-    assert early[2] < late[2] / 4.0, \
-        "起步速度≈0 时几乎不该有模糊（旧的 sin(πp) 包络这里反而最糊）：%.2f vs %.2f" \
-        % (early[2], late[2])
-    # 单调：速度变大时模糊不许反而变小。两条豁免：p=0 那一帧盖子摊平、投影退化；
-    # 速度 ≤0.01 时盖子投影只剩十几像素宽的薄缝，一条文字差半个像素就能让这个平均值
-    # 上下跳（纯重采样噪声，不是模糊在缩）。
+    slow = [item for item in samples if 0.01 < item[0] < 0.10][-1]     # 起步慢端
+    fast = [item for item in samples if 0.80 < item[0] < 0.999][-1]    # 收尾快端
+    assert slow[1] < fast[1] * 0.5, "取样点没取在起步/收尾两端：%s %s" % (slow, fast)
+    assert samples[0][2] < fast[2] / 20.0, \
+        "起步第一帧速度≈0，几乎不该有模糊：%.2f" % samples[0][2]
+    assert fast[2] > slow[2] * 1.4, \
+        "收尾最快端该比起步慢端糊得多（固定比例包络不会这样）：%.2f vs %.2f" \
+        % (fast[2], slow[2])
+    # 单调：速度变大时模糊不许反而变小。两条豁免：p=0 那一帧投影退化；
+    # 速度 ≤0.01 时足迹只剩十几像素宽，纯重采样噪声不是模糊在缩。
     for (progress0, speed0, blur0), (progress1, speed1, blur1) in zip(samples, samples[1:]):
         if progress0 <= 0.0 or progress1 <= 0.0:
             continue
@@ -1307,8 +1343,8 @@ def test_b5_wordbook_closing_blur_smears_the_content_inside_the_leaf():
     模糊。这条测试用一张高对比竖条图案锁死三件事：
     1. 正在移动时，叶片**内部**的画面必须和同一姿态的静止帧明显不同（内容自己被拖开）；
     2. 同一姿态不移动时（Δprogress = 0）必须一像素都不差（不能静止也糊）；
-    3. 移动时叶片内部仍要完全不透明：现在的快门是 12 个盖子姿态叠在**不透明的内容层**
-       上（不再用 Plus + 黑剪影那套），所以 alpha 天然是 255，不会"在板上打洞"。
+    3. 移动时叶片内部仍要完全不透明：快门是若干个叶片姿态叠在一起，每个姿态都是不透明的
+       记词板快照（单层，没有内容层垫底），所以 alpha 天然是 255，不会"在板上打洞"。
     """
     app()
     fold = gui.HingeFoldTransition()
@@ -1338,7 +1374,7 @@ def test_b5_wordbook_closing_blur_smears_the_content_inside_the_leaf():
 
     progress = 0.60
     sharp = render(progress)
-    moving = render(progress, previous=1.0)
+    moving = render(progress, previous=0.45)   # 收起方向（progress 涨）→ 有速度
     span = fold._shutter_span()[0]
     assert span > 0.05, "这一帧本来就该有快门长度，否则这条测试什么都没测：%.3f" % span
     edge = int(fold._free_edge_x(progress))
@@ -1365,7 +1401,7 @@ def test_b5_wordbook_closing_blur_smears_the_content_inside_the_leaf():
 
 
 def test_b5_wordbook_leaf_matches_real_panel_at_handoff():
-    """交接帧保真：盖子摊平那一刻必须和真实记词板**逐设备像素一致**。
+    """交接帧保真：叶片摊平那一刻（progress=0）必须和真实记词板**逐设备像素一致**。
 
     差一点就看得见——用户实测「动画里的记词板和实际的记词板有差别，过渡不好，
     有突兀感」，两次踩到：
@@ -1403,7 +1439,14 @@ def test_b5_wordbook_leaf_matches_real_panel_at_handoff():
         pm = QtGui.QPixmap(int(round(d.WB_W * ratio)), int(round(d.PANEL_H * ratio)))
         pm.setDevicePixelRatio(ratio)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
-        d.wbpanel.render(pm)
+        # 和叶子走同一条裁剪：#wbpanel 的 QSS 是"左两角 8px 圆角、右两角方角"，
+        # 而 render() 只会按矩形出图 —— 不裁的话这里量到的"真实"角是方角，
+        # 屏幕上其实不是（见下面单独的角断言）。
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        p.setClipPath(d._leaf_path())
+        d.wbpanel.render(p, QtCore.QPoint(0, 0))
+        p.end()
         return pm.toImage().convertToFormat(QtGui.QImage.Format.Format_ARGB32)
 
     real = shot()
@@ -1412,10 +1455,18 @@ def test_b5_wordbook_leaf_matches_real_panel_at_handoff():
             ratio, snap.width(), snap.height(), real.width(), real.height())
     leaf = snap.toImage().convertToFormat(QtGui.QImage.Format.Format_ARGB32)
 
+    # 反向锁一次圆角本身（上面两侧都裁、裁错会一起错）：左两个角必须透明、
+    # 右两个角必须实心。用户 m13717：「记词板左上角是圆角的，动画里会变成方角」。
+    for x, y in ((0, 0), (0, leaf.height() - 1), (1, 1), (1, leaf.height() - 2)):
+        assert leaf.pixelColor(x, y).alpha() == 0, \
+            "叶子左角没按 #wbpanel 的圆角裁：(%d,%d) alpha=%d" % (x, y, leaf.pixelColor(x, y).alpha())
+    for x, y in ((leaf.width() - 1, 0), (leaf.width() - 1, leaf.height() - 1)):
+        assert leaf.pixelColor(x, y).alpha() == 255, "叶子右角被裁圆了（右侧要贴着主面板）"
+
     target = QtGui.QImage(real.size(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
     target.setDevicePixelRatio(ratio)
     target.fill(QtCore.Qt.GlobalColor.transparent)
-    d._wb_fold.set_progress(1.0)
+    d._wb_fold.set_progress(0.0)
     d._wb_fold.render(target)
     flat = target.convertToFormat(QtGui.QImage.Format.Format_ARGB32)
 
@@ -1466,8 +1517,8 @@ def test_b5_wordbook_opening_paints_leaf_before_growing_the_window_mask():
     assert seen.get("n", -1) >= 1, (
         "放开窗口 mask 之前叶子一帧都没画（画了 %d 次）—— mask 变大会先把 backing store "
         "里的旧记词板合成出来" % seen.get("n", -1))
-    assert not d._wb_fold._pix.isNull() and not d._wb_fold._lid.isNull(), \
-        "Dock 的翻盖必须是「内容层 + 封面层」两层都有的实心画面：mask 放开那一帧不许留透明空档"
+    assert not d._wb_fold._pix.isNull() and d._wb_fold._lid is d._wb_fold._pix, \
+        "Dock 的翻盖必须先拍好记词板快照（单层：_lid 就是 _pix）：mask 放开那一帧不许留透明空档"
     d.close()
 
 
@@ -1505,7 +1556,13 @@ def test_b5_wordbook_closing_snapshot_has_content():
         pm = QtGui.QPixmap(int(round(d.WB_W * ratio)), int(round(d.PANEL_H * ratio)))
         pm.setDevicePixelRatio(ratio)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
-        d.wbpanel.render(pm)
+        # 叶子按 #wbpanel 的形状裁过（左两角 8px 圆角），这里量"收起前的画面"要用同一条形状，
+        # 否则比的只是 render() 的方角。圆角本身由 handoff 那条测试单独锁。
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        p.setClipPath(d._leaf_path())
+        d.wbpanel.render(p, QtCore.QPoint(0, 0))
+        p.end()
         return pm.toImage().convertToFormat(QtGui.QImage.Format.Format_ARGB32)
 
     before = shot()
@@ -1529,7 +1586,7 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
 
     **为什么不逐帧裁窗口 mask**：窗口 mask 走 `SetWindowRgn`，逐帧放大 region 时分层
     窗口不一定重画新露出来的那条，用户实测就是"记词板直接消失、狂点只闪一小块"。所以窗口
-    mask 只按开/关两个稳态各设一次；真实记词板内容固定在底层，透明盖子只负责过渡绘制。
+    mask 只按开/关两个稳态各设一次；真实记词板内容固定在底层，单层叶片只负责过渡绘制。
     """
     cfg = {"hotkey": "ctrl+shift+D", "dock": {"enabled": True},
            "providers": {"deepseek": {"url": "", "model": "", "key": ""}, "ollama": {"model": ""}}}
@@ -1555,8 +1612,8 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
     d.toggle_wordbook()
     assert d._wb_fold.isVisible(), "掀门动画期间应显示折叠预览层"
     captured = d._wb_fold._pix.toImage()
-    # 叶子carry 的就是记词板画面：投影四边形之外什么都不画，"只有在盖子下的部分
-    # 是可视的"。真实面板退场到叶子底下，位置仍然恒定。
+    # 叶片carry 的就是记词板画面本身：投影四边形之外什么都不画。真实面板退场到叶子底下，
+    # 位置仍然恒定。
     opaque_pixels = sum(
         1 for y in range(0, captured.height(), 8)
         for x in range(0, captured.width(), 8)
@@ -1615,11 +1672,13 @@ def test_b5_wordbook_door_opens_like_a_hinged_reveal():
         "收起方向没有运动模糊：用户报「收起动画没用运动模糊」"
     assert len(set(close_masks)) == 1, "关闭时窗口 mask 动画期间逐帧变化"
     assert d._wb_reveal == 0 and not d.wbpanel.isVisible(), "关完没收回：%s" % d._wb_reveal
-    # 关着的时候露出来的是**摊平的封面**（不透明的盖子，用户 m11485 要的"动画开始就有遮挡"）；
-    # 所以那块照样在窗口 mask 里，封面会吃鼠标是这一版有意的取舍 —— 旧行为是"合上=什么都
-    # 没有、点击穿透"。稳态不 arm 时（还没拍过快照）仍是点击穿透，见本测试开头那段。
-    assert d._wb_fold.isVisible() and d._wb_fold._progress == 0.0, "关完该停着一块摊平的封面"
-    assert d.mask().contains(far), "封面盖着那块，窗口 mask 就得含它，否则封面画不出来"
+    # 新单层语义：合上（progress=1）时叶片立到铰链边、投影≈0，什么都看不见；_settle 一律
+    # hide() 预览层，稳态交回真实面板/mask，不再常驻一块摊平封面。所以窗口 mask 也不该再含
+    # 记词板那块（含了就会隔着空气吃鼠标）。稳态不 arm 时（还没拍过快照）同样是点击穿透。
+    assert not d._wb_fold.isVisible() and d._wb_fold._progress == 1.0, \
+        "关完该停在立到铰链边（progress=1）且隐藏预览层，不是旧版那块常驻摊平封面"
+    assert not d.mask().contains(far), \
+        "关完窗口 mask 不该再留着记词板那块，否则会隔着空白吃鼠标"
     d.close()
 
 
