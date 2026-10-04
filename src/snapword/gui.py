@@ -1288,23 +1288,29 @@ class Card(QtWidgets.QWidget):
         self._place(at)
         self._closing = False
         self._close_done = []
-        # 入场过渡走"位置滑动 + 子控件依次淡入（stagger）"，**不走 windowOpacity 动画**：
-        # WA_TranslucentBackground + FramelessWindowHint 的顶层窗口在 Windows 上，
-        # windowOpacity 动画是出了名的不可靠 —— Qt 官方 bug 库里这类窗口的 opacity 动画
-        # 要么直接跳变（QTBUG-33025）、要么结尾闪黑（QTBUG-29010）、要么重绘错乱
-        # （QTBUG-28531）。用户报的"弹出没有过渡、闪动、虚影"就是这条路。位置动画和
-        # 控件级 QGraphicsOpacityEffect 都不踩它。
-        self.setWindowOpacity(1.0)       # 防御：上次可能淡出一半就被打断
+        # 入场过渡 = 位置滑动 + **整窗淡入** + 子控件依次淡入（stagger）。
+        # 整窗淡入是后补的那一半：之前卡片本体（边框/按钮/星标）是 show() 后第一帧就
+        # 100% 不透明地"弹"出来，只有文字晚 ~350ms 才淡进来，用户读作「卡片的出现
+        # 太生硬、没有过渡」。这里以前写着"windowOpacity 动画在 Windows 上不可靠
+        # （QTBUG-33025/29010/28531）"，那是当年没敢试的推断，没有真机数据；现在
+        # A/B 过了（`tmp/_card_fade_test.py`，副屏抓屏成胶片）：
+        #   · win 模式（整窗 opacity 与位移并行）——干净，第一帧全透明，随后淡入；
+        #   · eff 模式（给卡片顶层挂 QGraphicsOpacityEffect）——**坏**，卡片在
+        #     t≈330ms 之后整块从屏幕上消失、再也没回来。
+        # 所以整卡淡入只走 windowOpacity，绝不要给顶层挂 effect。
+        self.setWindowOpacity(0.0)       # 先全透明再 show：第一帧不能是"已经画好"的卡片
         self._stagger_prepare()          # 先钉成全透明，再 show（顺序说明见那个方法）
         self.show()
         self.raise_()
         p = self.pos()
         # 从细边（常驻面板）那一边滑出来：卡片是"从面板里抽出来的"，方向本身就是叙事。
-        # 24px 的滑动在 240ms 里足够被看见（旧值 14px 小到几乎注意不到——加上
-        # windowOpacity 动画在真机不生效，用户看到的就是"没有任何过渡直接出现"）。
-        # stagger 必须等位移动画跑完再开始：QGraphicsOpacityEffect 在窗口移动期间重绘
-        # 不跟随，会把子控件画在旧位置上（真机实测：释义叠到词头上）。
-        _anim(self, b"pos", QtCore.QPoint(p.x() + 24, p.y() + 10), p, DUR["base"],
+        # 24px 的滑动在 240ms 里足够被看见（旧值 14px 小到几乎注意不到）。
+        # 淡入与滑动同长，落位时正好完全不透明；stagger 必须等位移动画跑完再开始：
+        # QGraphicsOpacityEffect 在窗口移动期间重绘不跟随，会把子控件画在旧位置上
+        # （真机实测：释义叠到词头上）。
+        fade = DUR["base"]
+        _anim(self, b"windowOpacity", 0.0, 1.0, fade)
+        _anim(self, b"pos", QtCore.QPoint(p.x() + 24, p.y() + 10), p, fade,
               done=lambda *_: self._stagger_in())
 
     def _stagger_prepare(self):
@@ -1596,10 +1602,15 @@ class Card(QtWidgets.QWidget):
         if not self.isVisible():
             self._really_hide()
             return
-        # 关闭也绕开 windowOpacity（半透明无边框窗口在 Windows 上会闪黑）。始终从
-        # 当前实际位置向下离场，避免打断入场动画时先跳回旧坐标；OutCubic 在末尾
-        # 收住，比 InCubic 在最后一帧突然加速后 hide 更顺滑。
+        # 关闭 = 向下 16px 滑走 + 同一段时间里整窗淡出。始终从当前实际位置离场，
+        # 避免打断入场动画时先跳回旧坐标；OutCubic 在末尾收住，比 InCubic 在最后一帧
+        # 突然加速后 hide 更顺滑。淡出从**当前实际不透明度**起（入场淡入还没跑完就被
+        # 关掉时，硬从 1.0 起会先闪一下全不透明）；淡出与位移同长（都 DUR["fast"]），
+        # 滑动结束时窗口已经看不见，`_really_hide` 的 hide() 不会"啪"地掉一帧。
+        # 同样不要用 QGraphicsOpacityEffect（顶层挂 effect 会让卡片中途整块消失，
+        # 见 `show_brief` 里的实测注释）。
         p = self.pos()
+        _anim(self, b"windowOpacity", self.windowOpacity(), 0.0, DUR["fast"])
         _anim(self, b"pos", p, QtCore.QPoint(p.x(), p.y() + 16), DUR["fast"],
               curve=QtCore.QEasingCurve.Type.OutCubic, done=self._really_hide)
 

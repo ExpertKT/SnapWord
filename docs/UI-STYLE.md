@@ -77,8 +77,8 @@ Windows 11 Fluent 的浮层/对话框圆角就是 8px，自创一个 10 只会�
 | 面板展开 / 收起 | 240ms，OutQuint/InCubic | **窗口宽度固定**（2026-10-03 起 = 记词板 300 + 面板宽 + 缝 6 + 细边 26，默认 652），只滑 panel；收起时 `setMask` 把可点区裁成 rail 那一条（透明区不挡鼠标）。**不许再 resize 窗口**——半透明窗口 resize 会被 Windows 拿旧 buffer 拉伸一帧（"左侧一闪"的根源），见坑清单 |
 | 记词板开 / 关 | 400ms，OutCubic / InCubic | 单扇右缘铰链，**叶子是单层：就是记词板快照本身**（`_WordbookFold.start(pix, progress)` 不传 `lid` 时 `self._lid = self._pix`，唯一一层画的就是真实内容，设备像素 + DPR 原样带走）：`progress` 是"叶子立起来的程度"，`progress=1` 立到铰链边（投影≈0，什么都看不见）、`progress=0` 完全摊平，所以**展开动画 = progress 由 1 降到 0（摊平），收起动画反过来**（`_angle_for_progress` 用 `maxAngle · progress`）。`paintEvent` 在单层模式下**不再**先平铺一层"内容层"，所以投影四边形以外就是**透明**（露出窗口底色）——这正是用户 2026-10-04 16:28 那版被认可的观感；早先那版"两层：内容层 + 空壳封面"是后来加的、已被用户否决，2026-10-05 回退成单层（详见下面「`HingeFoldTransition` 调参」一节）。真实面板留在底层原地不动（过渡期间退场，`_settle` 时回来），打开前先 `wbpanel.render()` 拍一张快照当叶子画面 —— **快照必须按屏幕缩放拍**（`wbpanel.devicePixelRatioF()`，本机 1.25 → 375×375 设备像素，`setDevicePixelRatio(ratio)`）：按逻辑像素拍的话盖住时被放大 1.25 倍＝整片发糊，摊平交回真实面板的瞬间文字突然变清晰，用户读作"动画里的记词板和实际的记词板有差别、过渡突兀"（`test_b5_wordbook_leaf_matches_real_panel_at_handoff` 连 DPR 一起锁死，交接帧与真实面板必须**逐设备像素一致**）；`start()` 对传进来的像素**原样使用**，不许再补描边/圆角——#wbpanel 是左圆角 8、右两角直角、去掉右边框，补一圈四角描边会让交接瞬间右侧多出一条边。铰链固定在记词板右边缘（贴主界面），自由边（左缘）一边向右收、一边跟着透视在竖直方向**对称**地收一点，**整片叶子没有任何上下位移**——加抬升会立刻读成"从上方俯视盒子"，所以保留的是**镜头正对屏幕的 3D 透视**（绕竖直铰链、有景深收窄），不是俯视；`_project_point` 的水平分支因此只做 `screen_x = W - distance·cos(a)·scale` 和 `screen_y = H/2 + (y - H/2)·scale`，自由边上下两缘永远关于中轴镜像、永远留在板面高度之内（测试 `test_b5_wordbook_right_hinge_projects_head_on` 锁死这两条）。叶子始终以 `(0,0)` 为贴图原点。**自由边外不画任何通高的落影/冷色光带，铰链侧那条 10px 冷白高光也一并删掉**：落影带在窄进度下比叶子本身还宽（观感就是"记词板左沿贴了一条阴影"），高光则是整条竖直矩形、不跟着投影走，在斜边上会露出硬邦邦的一截截断（用户报的"边角有绘制问题"）——两条都已删。叶片内部**不再有任何暗部/冷光四边形**（`_draw_effects` 整段删除：用户报过"动画里的记词板比动画外暗几个度"）。**叶子内部不挖洞/不透光**：叶子 carry 的就是记词板画面；投影四边形以外的透明是这一版的有意取舍（不是 bug）。**收起方向的运动模糊按瞬时速度走（快门积分）**：`blurAmount` 保持默认开，`set_progress` 把 `|Δprogress|` 记进 `_velocity`，`paintEvent` 在"上一帧到这一帧走过的轨迹"上等时距取 12 个姿态叠加，拖尾长度 = `_velocity × blurFrames`、并用像素预算 `blurMaxPx` 兜住；起步速度≈0 所以边缘干净、p→0 那几帧拉成一条 —— 旧版固定比例三档 + `sin(πp)` 包络被用户评为"没有非线性的动态模糊"（`test_b5_wordbook_closing_blur_scales_with_speed` 按真实 `p = 1 - t³` 轨迹逐帧量拖尾像素长度）。方向闸门：只有 `_delta > 0`（收起方向、progress 往 1 涨）才给残影强度，展开方向恒 0（展开时"来路"是更立起来的姿态、投影更窄，整块落在当前叶子里，画了也看不见）。**那 12 个叶子姿态是在一张透明缓冲上按"由老到新"的 `SourceOver` 叠出来的**（不是只在自由边外挂一条灰带，也不再走 `Plus` + 黑剪影 + 渐变补底那套），详见下面「`HingeFoldTransition` 调参」一节。斜边开抗锯齿（`Antialiasing`）：斜姿态下叶子上下两条边是斜线，不开就是阶梯状硬边；摊平端点走整像素 `drawImage`，AA 不改变交接帧（上面那条逐设备像素测试锁着）。**新建的列表行必须显式 `show()` 再拍快照**：`refresh_wordbook` 末尾 `row.show()` + `wb_v.activate()`——`QWidget.render()` 根本不画隐藏的子控件，否则收起瞬间拍到的叶子是一整块空板，用户读作"收起时内容不同步"（`test_b5_wordbook_closing_snapshot_has_content` 锁死"收起快照 == 收起前那一帧"）。不用 Source 清空共享绘制缓冲区。动画期间不移动内容、不逐帧修改子窗口或顶层 mask，端点恢复真实面板交互。连续点击会从当前进度反向；窗口 mask 仅在过渡边界和稳态更新；**不 resize 窗口**。 |
 | 卡片改宽度 / 改高度 | 拖动中实时跟手（不跑动画） | 抓**四条 12px 透明子控件**（`Card.grip_l/grip_r` 宽 `GRIP_W=12`；`grip_t/grip_b` 高 `GRIP_H=12`，上下两条左右各让开 `GRIP_W`）触发，光标分别是 ↔ / ↕。宽度：`setFixedWidth` + 重排（`_fit_height`）。高度：**绝不能直接 `resize`**（外层布局一激活就按 sizeHint 顶回去，实测会被顶到 1100px）—— 正确路径是改那块滚动区（详解/聊天）的 `setFixedHeight`，再让 `_fit_height()` 重新量一遍；短卡没有可伸缩内容时，多出来的一截进 `_v_stretch` 弹簧（按钮行因此仍贴底边），`show_brief` 里复位。两者都**没有过渡动画**——动画会让被拖的边滞后于光标。**别改回按坐标判边**：卡片最外 8px 是投影留白，描边在 x=8，按坐标判（x≤6）用户按描边时事件落在 `frame` 上、进不了 `Card.mousePressEvent`，会变成"拖不动/在挪窗口" |
-| 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ 元素 stagger 淡入；**不走 windowOpacity 动画**（半透明无边框窗口上不可靠，见坑清单）；**`_stagger_prepare()` 必须在 `show()` 之前把内容静态钉 0**，stagger **必须等 pos 动画 done 再启动**。少了 prepare 就是"卡片带全部文字滑进来（已经能读）→ 滑完一起变 0 → 再淡回来"，用户的原话是"弹出的动画头尾反了"（实测 t≈0-200ms 全 vis、t≈240ms 一起 0.00） |
-| 卡片关闭 | 150ms，OutCubic | 从当前实际位置向下 16px 滑出再 hide；**不走 windowOpacity 淡出**（同上，结尾会闪黑）。Dock 收起时先等待卡片关闭回调，再关记词板和主面板 |
+| 卡片弹出 | 240ms + stagger 45ms | 滑入（从细边方向，x+24）+ **整窗淡入**（`setWindowOpacity(0.0)` → `_anim(windowOpacity, 0→1, DUR["base"])`，与位移同长）+ 元素 stagger 淡入；**`_stagger_prepare()` 必须在 `show()` 之前把内容静态钉 0**，stagger **必须等 pos 动画 done 再启动**。少了 prepare 就是"卡片带全部文字滑进来（已经能读）→ 滑完一起变 0 → 再淡回来"，用户的原话是"弹出的动画头尾反了"（实测 t≈0-200ms 全 vis、t≈240ms 一起 0.00） |
+| 卡片关闭 | 150ms，OutCubic | 从当前实际位置向下 16px 滑出 + **同长整窗淡出**（`_anim(windowOpacity, windowOpacity() → 0, DUR["fast"])`，从**当前实际值**起，免得打断入场淡入时先闪一下全不透明），滑动结束时窗口已经不可见、`_really_hide()` 才 hide。**顶层 `QGraphicsOpacityEffect` 不行**：真机录屏 A/B（`tmp/_card_fade_test.py`）里 win 模式干净、eff 模式卡片淡到一半整块消失 —— 子控件级 effect 只许用在 stagger，且必须等位移跑完。Dock 收起时先等待卡片关闭回调，再关记词板和主面板 |
 | 卡片长高 | 240ms，OutCubic | `_resize_keep_place`：`SetNoConstraint` 布局 + 只量不设 + 钉 frame 高 + 动画期间钉窗口最大高度 + resizeEvent 自愈（缺一不可，见坑清单） |
 | 内容揭示（详解/聊天） | 长高 240ms → 淡入 150ms | `_graceful_reveal`：长高期间把内容 opacity **静态钉 0**，长高结束才淡入。**绝不在窗口长高期间跑 opacity 动画**（残影 bug 的根源），静态 0 不发动画、不触发 |
 | 复制成功 | 150ms | `flash_success()` 绿色脉冲（边框+字一起亮一下回落）；1.2s 后文案还原 |
@@ -367,16 +367,23 @@ Windows 合成器对**半透明窗口 resize** 的处理：先拿旧 buffer 拉�
 
 `start(pix, progress=0.0, lid=None)` 的贴图契约（要和真实控件无缝交接就先看这条）：传进来的 `pix` **按原样**用 —— 保留它的 `devicePixelRatio`、不补底色、不补圆角描边，只有传空/无效 pixmap 时才退回 `T["surface"]` 底色 + 一圈 8px 圆角 hairline；`lid` 是可选、单测用的旧参数（Dock 不再传）：省略时 `self._lid = self._pix`、叶子就是 `pix` 本身（单层），传了才退回"内容层 + 盖子层"的两层模式。所以调用方要用**控件自己的设备像素**拍快照（`QPixmap(w * dpr, h * dpr)` + `setDevicePixelRatio(dpr)`），否则交接时糊或错位。`_draw_slice(painter, pixmap, source, destination, ...)` 里 src 四边形走 `source.deviceIndependentSize()`，**不能**用 `source.width()/height()`（那是设备像素，会让贴图在 quad 里再缩 1/dpr）。
 
-### 半透明无边框窗口：windowOpacity 动画不可依赖（2026-10-02）
+### 半透明无边框窗口：整窗 opacity 与顶层 effect 的取舍（2026-10-02 立，2026-10-05 复测修正）
 
-`WA_TranslucentBackground + FramelessWindowHint` 的顶层窗口在 Windows 上，windowOpacity
+2026-10-02 记过一条：`WA_TranslucentBackground + FramelessWindowHint` 的顶层窗口在 Windows 上，windowOpacity
 动画是 Qt 官方 bug 库里的老问题：要么直接跳变（QTBUG-33025）、要么结尾闪黑
-（QTBUG-29010）、要么重绘错乱（QTBUG-28531）。用户在真机上看到的"弹出没有过渡、
-闪动、虚影"三连就是它——我们在无桌面环境里量 windowOpacity **属性值**明明在平滑变化
-（0→1），真机上却根本不可见。这种"属性在变、画面不变"的断层，只有真机合成器能暴露，
-测试环境里量属性值是量不出来的。
+（QTBUG-29010）、要么重绘错乱（QTBUG-28531）。当时在无桌面环境里量 windowOpacity **属性值**明明在平滑变化
+（0→1），真机上却"看不见过渡"，于是卡片入场改成了"位置动画 + 子控件 stagger"。
 
-**规矩：这类窗口的进出场过渡，只用位置动画（`pos`/`geometry`）+ 控件级
-`QGraphicsOpacityEffect`（stagger），不用 windowOpacity。** QMenu/对话框那种普通 popup
-不受影响（托盘菜单的淡入保留）。
+2026-10-05 用户报「卡片的出现和关闭太生硬没有过渡」，重新在真机副屏上录屏 A/B
+（`tmp/_card_fade_test.py`：每帧 `QScreen.grabWindow` 抓卡片那块，拼成胶片）：
+  · win 模式 —— `show()` **之前**先 `setWindowOpacity(0.0)`，随后与 `pos` 动画并行淡入：
+    干净。第一帧全透明，随后可见地淡上来，没有跳变也没有闪黑；
+  · eff 模式 —— 给卡片**顶层**挂 `QGraphicsOpacityEffect` 再动它的 opacity：**坏**。
+    卡片在 t≈330ms 之后整块从屏幕上消失、再也没回来。
+所以当年那条结论只对了一半：不可依赖的是"给顶层挂 effect"，不是 windowOpacity 本身
+（差别很可能就在"映射之前就把不透明度压到 0"这一步 —— 窗口映射之后再去改才是跳变的来源）。
+
+**规矩（2026-10-05 起）：卡片的出入场 = 位置动画 + 整窗 `windowOpacity` 淡入/淡出；
+顶层 QGraphicsOpacityEffect 一律禁止**（子控件级 effect 只用在 stagger，且必须等位移
+动画结束）。QMenu/对话框那种普通 popup 不受影响（托盘菜单的淡入保留）。
 

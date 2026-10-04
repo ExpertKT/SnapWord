@@ -815,6 +815,30 @@ def test_b5_resize_during_entrance():
     c.close()
 
 
+def test_b5_card_fades_in_and_out():
+    """卡片的出现/关闭必须是渐变而不是硬弹。
+
+    2026-10-05 用户报「卡片的出现和关闭太生硬没有过渡」：当时卡片本体（边框/按钮/星标）
+    在 show() 后第一帧就 100% 不透明地弹出来，只有文字晚 ~350ms 才淡进来；关闭更是
+    滑 16px 就直接 hide。现在出入场都在位移之外挂一条整窗 opacity 动画
+    （不用 QGraphicsOpacityEffect —— 给顶层挂 effect 会让卡片中途整块消失，
+    真机录屏实测 `tmp/_card_fade_test.py` eff 模式）。
+    """
+    app()
+    c = gui.Card()
+    c.show_brief({"query": "x", "lexeme": "x", "kind": "word", "cn": ["释义"], "notes": []})
+    assert c.windowOpacity() < 0.5, "入场第一帧就已经不透明（硬弹出）：%.2f" % c.windowOpacity()
+    wait(gui.DUR["base"] + 120)
+    assert c.windowOpacity() > 0.99, "淡入没收尾：%.2f" % c.windowOpacity()
+    c.hide_card()
+    fading = [a for a in gui._ANIMS
+              if a.targetObject() is c and a.propertyName() == b"windowOpacity"]
+    assert fading, "关闭没挂淡出动画（会滑到底直接 hide）"
+    wait(400)
+    assert not c.isVisible(), "关闭跑完还留着窗口"
+    assert c.windowOpacity() > 0.99, "关闭收尾没把不透明度复位：%.2f" % c.windowOpacity()
+
+
 def test_b5_stagger_cleans_up():
     """stagger 用完必须把 effect 摘掉。
 
