@@ -41,8 +41,12 @@ GROUPS = {"可用性": [k for k in WEIGHTS if k.startswith("a")],
 def run_core():
     """跑 test_core.py（它是脚本，用子进程拿结果）。"""
     try:
-        p = subprocess.run([sys.executable, str(ROOT / "tests" / "test_core.py")],
-                           capture_output=True, text=True, cwd=str(ROOT), timeout=180)
+        # `-X utf8` + errors="replace"：子进程会打印 Windows 给的中文错误（剪贴板
+        # COM 失败之类），那是控制台的 ANSI 编码，父进程按 UTF-8 解会直接把读线程
+        # 打死（p.stdout 变 None），闸门看起来像"卡死"。
+        p = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / "tests" / "test_core.py")],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(ROOT), timeout=180)
     except subprocess.TimeoutExpired:
         # 没有 timeout 的话，test_core 一挂这里就永远等下去，外面看就是"闸门卡死"
         return 0, 1, "test_core 跑超过 180 秒还没完（闸门不再干等）", ""
