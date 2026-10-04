@@ -629,6 +629,44 @@ def test_b5_detail_reveals_gracefully():
     c.close()
 
 
+def test_b5_slow_detail_result_does_not_leak_onto_the_next_word():
+    """慢详解回来时卡片已经换了词：旧词的详解不许盖上去（"开过多个卡片偶尔会串"）。
+
+    复现路径：同一张卡查 alpha、点「详细解释」（真机上模型要跑几十秒），这期间用户在
+    这张卡上查下一个词 beta。旧任务回来时如果直接 set_detail，alpha 的详解就会贴在
+    beta 上；旧任务失败时还会把"没能生成详解"甩给 beta。修法见 App._run / _stale：
+    每次任务盖一个 Card.req_seq，回调比对不上就整条丢掉；换词时 Card.show_brief 还要
+    把上一个词的「详解」秒表停掉（否则那张表会把"正在整理…N 秒"重新 show 到新词上）。
+    """
+    app()
+    ctrl = gui.App({"hotkey": "ctrl+shift+D", "dock": {"enabled": True}})
+
+    class Slow:
+        """慢模型：0.4 秒，足够让"结果回来之前卡片已经换了词"。"""
+
+        def detail(self, brief):
+            time.sleep(0.4)
+            return "# 详解 " + brief["query"]
+
+        def enrich(self, brief):
+            return None                            # 有道的对照行不参与这条用例
+
+    ctrl.lookup = Slow()
+    card = ctrl._ensure_card()
+    ctrl._show_brief({"query": "alpha", "cn": ["a"], "kind": "word"}, "alpha", None, card=card)
+    ctrl._on_detail(card, card.brief)              # 详解在飞
+    wait(120)
+    ctrl._show_brief({"query": "beta", "cn": ["b"], "kind": "word"}, "beta", None, card=card)
+    wait(900)                                      # 旧任务早该回来了
+    text = card.detail.toPlainText()
+    assert "alpha" not in text, "换词后旧词的详解串到新词卡上了：%r" % text[:80]
+    assert "正在整理" not in text, "旧任务的等待文案还挂在新词上：%r" % text[:80]
+    assert not card._detail_tick.isActive(), "换词后旧词的详解秒表还在跑"
+    assert card.btn_detail.isEnabled(), "换词后「详解」按钮该回到可用状态"
+    assert card.brief["query"] == "beta", "卡片该停在新词上"
+    card.close()
+
+
 def test_b5_stagger_reuse_no_dangling():
     """复用卡片查第二个词时，不能把 opacity 动画的悬垂引用留在 `_ANIMS` 里。
 
@@ -1160,7 +1198,7 @@ def test_b5_wordbook_right_hinge_projects_head_on():
     d = gui.Dock({'dock': {'expanded': True}}, lambda: None, lambda t: None,
                  lambda: None, lambda: None, lambda: None)
     f = d._wb_fold
-    assert f.direction == 'horizontal' and f.duration == 620
+    assert f.direction == 'horizontal' and f.duration == 400
     leaf = QtGui.QPixmap(300, 300)              # 叶片＝记词板快照，画蓝
     leaf.fill(QtGui.QColor('blue'))
     f.start(leaf, 0.0)
@@ -1259,7 +1297,7 @@ def test_b5_wordbook_closing_blur_scales_with_speed():
     """收起方向的运动模糊必须跟**瞬时速度**走，不是固定比例。
 
     用户 m10767：「没有非线性的动态模糊，动画观感很差」。新语义下收起 = progress 从 0 涨到
-    1，真实 620ms 套 InCubic（`_wb_reveal = WB_W*(1-t^3)`）→ **p = t^3**：起步慢、结尾最快。
+    1，真实 400ms 套 InCubic（`_wb_reveal = WB_W*(1-t^3)`）→ **p = t^3**：起步慢、结尾最快。
     所以糊动必须起步那一帧几乎为零、收尾最明显。旧版按固定比例取 3 个姿态、强度再乘
     sin(πp)，每个速度糊一样的量。
 
@@ -1308,7 +1346,7 @@ def test_b5_wordbook_closing_blur_scales_with_speed():
         return total / float(covered) if covered else 0.0
 
     # 按真实收起轨迹逐帧走：progress 从 0 涨到 1，套 InCubic → p = t^3。
-    frames = 37                                 # 620ms @ 60fps
+    frames = 25                                 # 400ms @ 60fps
     samples = []
     previous = 0.0
     for index in range(1, frames + 1):

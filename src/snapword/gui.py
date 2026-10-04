@@ -953,6 +953,10 @@ class Card(QtWidgets.QWidget):
         self._w = int(width) or max(360, min(430, int(avail_w * 0.45)))
         self.setFixedWidth(self._w)
         self.brief = None
+        # 这张卡发起过多少次后台任务。每发起一次就 +1，回调里比对序号：对不上说明
+        # 这张卡已经换了任务（最典型的是换了词），旧任务的结果直接丢，不许盖到新内容上
+        # —— 用户报的"开过多个卡片偶尔会串"。慢模型下这个窗口有几十秒，特别容易撞上。
+        self.req_seq = 0
         self.pinned = False
         self._drag = None
         self._rest_pos = None           # 入场动画的稳定终点，关闭时从这里平滑离场
@@ -1205,6 +1209,13 @@ class Card(QtWidgets.QWidget):
         self.brief = brief
         self._clear_chips()
         self.detail.hide()
+        # 换词了，上一个词「详解」的等待态（秒表 + 按钮文案）必须一起收掉：那张秒表还在跑的话
+        # 会把「正在整理…已经 N 秒」重新 show 到新词上；而旧详解回来时序号已过期会被丢掉，
+        # 没人再来关这张表。收掉后新词这里是"没点过详解"的干净状态。
+        self._detail_tick.stop()
+        self.detail.clear()
+        self.btn_detail.setEnabled(True)
+        self.btn_detail.setText("详解")
         self.chat_log.hide()
         self.chat_row.hide()
         self.chat_log.clear()
@@ -2755,7 +2766,10 @@ class Dock(QtWidgets.QWidget):
         # 残影（运动模糊）默认开着：收起方向每一帧在自由边外留三档淡一点的
         # 旧姿态，叶子边缘就有拖尾；展开方向 set_progress 会把强度按方向清零，
         # 不会在铰链侧糊出一片。
-        self._wb_fold = _WordbookFold(self, direction="horizontal", duration=620,
+        # 400ms：240ms 那版用户嫌"太快"（m08139），620ms 这版又嫌"不够干脆利落，有点慢"
+        # —— 取中间偏快的一档。缓动仍是展开 OutCubic / 收起 InCubic（收起方向的运动模糊
+        # 靠 InCubic 的"起步慢、收尾快"才糊在刃上，见 HingeFoldTransition.set_progress）。
+        self._wb_fold = _WordbookFold(self, direction="horizontal", duration=400,
                                       maxAngle=89)
         self._wb_fold.setGeometry(0, 0, self.WB_W, self.PANEL_H)
         self._wb_fold.hide()
@@ -3743,15 +3757,33 @@ class App(QtCore.QObject):
         转圈和答案会跑到最新那张卡上，旧卡毫无反应（hy4 评审第 3 条）。
         """
         j = Job(fn, *args, stream=bool(kw.pop("stream", False)), **kw)
-        j.done.connect(lambda r, f=fn, c=card: self._on_job_done(f, r, c))
-        j.fail.connect(lambda e, f=fn, c=card: self._on_job_fail(f, e, c))
-        j.progress.connect(lambda p, f=fn, c=card: self._on_job_progress(f, p, c))
+        # 给这次任务盖个序号（见 Card.req_seq）：这张卡以后又发起别的任务时，旧任务的
+        # 回调会因为序号过期而被丢掉 —— 同一个词查了还没回来就换下一个时尤其明显。
+        seq = None
+        if card is not None:
+            card.req_seq = getattr(card, "req_seq", 0) + 1
+            seq = card.req_seq
+        j.done.connect(lambda r, f=fn, c=card, s=seq: self._on_job_done(f, r, c, s))
+        j.fail.connect(lambda e, f=fn, c=card, s=seq: self._on_job_fail(f, e, c, s))
+        j.progress.connect(lambda p, f=fn, c=card, s=seq: self._on_job_progress(f, p, c, s))
         j.finished.connect(lambda j=j: self._jobs.remove(j) if j in self._jobs else None)
         self._jobs.append(j)
         j.start()
 
-    def _on_job_progress(self, fn, piece, card=None):
+    def _stale(self, card, seq):
+        """这张卡后来又发起过任务，就把现在这个旧任务的回调整个丢掉。
+
+        「开过多个卡片偶尔会串」的根子：一张卡上的「详解」要跑几十秒（kilo 那条路最久
+        60 秒），这期间用户在这张卡上查了下一个词；旧详解回来时卡片已经换了词，直接
+        set_detail 就会把上一个词的详解贴到新词上。同一个道理也管流式问答：换了词，
+        上一问的答案不许继续往新词的气泡里灌。
+        """
+        return card is not None and seq is not None and getattr(card, "req_seq", seq) != seq
+
+    def _on_job_progress(self, fn, piece, card=None, seq=None):
         """流式回答：先来 ("src", 谁在答)，之后是一段段 ("text", 正文)。"""
+        if self._stale(card, seq):
+            return
         card = card if card is not None else self.current
         if getattr(fn, "__name__", "") != "_ask_stream" or not card:
             return
@@ -3765,8 +3797,10 @@ class App(QtCore.QObject):
         elif kind == "text":
             card.chat_push(str(val))
 
-    def _on_job_done(self, fn, result, card=None):
+    def _on_job_done(self, fn, result, card=None, seq=None):
         name = getattr(fn, "__name__", "")
+        if self._stale(card, seq):
+            return
         card = card if card is not None else self.current
         if name == "_ocr_then_lookup":
             r = result
@@ -3800,8 +3834,10 @@ class App(QtCore.QObject):
                 card.chat_in.setEnabled(True)    # 答完了，放开输入框
                 card._resize_keep_place()        # 收尾时按最终高度定一次
 
-    def _on_job_fail(self, fn, err, card=None):
+    def _on_job_fail(self, fn, err, card=None, seq=None):
         name = getattr(fn, "__name__", "")
+        if self._stale(card, seq):
+            return
         card = card if card is not None else self.current
         if name == "_ask_stream" and card:
             card.chat_in.setEnabled(True)
