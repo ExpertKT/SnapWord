@@ -17,6 +17,8 @@
 4. **位置**：`F:\SnapWord`，暂不发 GitHub。
 5. **小 AI 答疑**：卡片里内嵌。"默认本地 9B 答（免费、不抢焦点），答不准时一键转 DeepSeek"。
    实现上是**按住 Shift 回车**才走 DeepSeek（见 `gui.py` 的 `Card._send`）。
+   **2026-10-05 改**：默认改成免费云端 pollinations（见文末「公开仓库的默认值」），
+   本地 9B 降级成"装了才用"。
 6. **常驻面板**：User said (m00717): "我需要他能默认挂在屏幕右侧，可以展开ui，可以不依赖快捷键"。
    → `gui.Dock`，默认开（`config.dock.enabled`）。这一条是硬需求：**热键一条都注册不上时，
    全部功能仍然可用**，所以凡是新增功能都要在 dock 面板上留一个入口。
@@ -66,7 +68,8 @@
   `hk.registered` 里，`gui.run` 的 `after_hotkeys()` 用托盘气泡告诉用户换成了哪个。
   **不要再用模态 QMessageBox 报热键错误**——那会抢焦点，违反第一条硬要求。
 - **某个窗口类的名字**要用来判断能不能发 Ctrl+C：`winput.CONSOLE_CLASSES`。
-- **Ollama** `http://127.0.0.1:11434/v1`，唯一模型 `qwen3.5:9b`。
+- **Ollama**（**可选**：`providers.ollama.enabled` 默认 false，本机装了才开）
+  `http://127.0.0.1:11434/v1`，唯一模型 `qwen3.5:9b`。
   **必须发 `reasoning_effort: "none"`**，否则思考模型回空 content
   （`providers.chat` 检测到空内容会直接报错，就是为了把这个坑喊出来，别把那段删了）。
 - 托盘图标是代码画的（`gui.Tray`），**没有图标文件**，别去找 `.ico`。
@@ -270,13 +273,17 @@
 - 流式：`providers.chat_stream()`（OpenAI 兼容 SSE，逐段 `yield`）；`Job(stream=True)` 把生成器
   的每段 `progress.emit` 回主线程（`_on_job_progress` → `Card.chat_push`）。**一个字都没吐出来时
   自动退回 `chat()` 一次性结果**，所以调用方不需要区分流式/非流式。
-- 谁来答：`lookup.ask_plan()` 先 `providers.ollama_up()` 探一下 `/api/tags`（结果缓存 30s）——
-  **本地没在跑且 DeepSeek 有 key 就自动转 DeepSeek**；两边都没配就抛一句人话（告诉用户去哪填、
-  怎么 `ollama serve`），绝不干等 180 秒超时。`Shift+回车`/`Shift+点发送` = 强制 DeepSeek。
+- 谁来答：`lookup.ask_plan()` 的排队是 **Ollama 在跑 → 填了 key 的联网模型 → 免费云端**
+  （kilo / pollinations，都不用注册不用 key，`providers.kilo` + `providers.pollinations` 默认都开着，
+  按 `providers.FREE_ORDER` 换手）。探活用
+  `providers.ollama_up()` 打 `/api/tags`（结果缓存 30s）；三条路都关着才抛一句人话
+  （告诉用户去开免费云端、或者怎么 `ollama serve`），绝不干等 180 秒超时。
+  `Shift+回车`/`Shift+点发送` = 强制走联网模型。
 - 追问带上下文：`App._chat_hist` 只留最近 8 条，换词查（`_show_brief`）就清空。
 - 百度翻译：`providers.baidu()`，`sign = md5(appid + q + salt + key)`（**这个拼接顺序不能改**），
   要用户自己去 fanyi-api.baidu.com 免费领 appid+密钥，填在设置的「百度 appid / 百度密钥」。
-  释义阶梯因此变成：缓存 → ECDICT → 有道 → 百度 → 本地 9B。
+  释义阶梯因此变成：缓存 → ECDICT → 有道 → 百度；模型那条阶梯是
+  带 key 的联网模型 → 本地 9B（在跑）→ 免费云端。
 - **`gui.py` 里曾经根本没有 `_esc()`，而 `Card.append_chat/chat_begin` 都在用它** →
   一按「问 AI」就 `NameError`。这说明"问 AI"这条路以前从没在 GUI 里真跑过。
   你往 `QTextBrowser` 塞 `<b>` 富文本时，用户和模型给的字符串**必须先 `html.escape`**，
@@ -285,7 +292,7 @@
 ## 怎么验证（改完必须跑的那几样）
 
 ```bat
-:: 1. 纯逻辑（无框架裸断言，秒出，23 个）
+:: 1. 纯逻辑（无框架裸断言，秒出，27 个）
 F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py
 
 :: 1b. OCR 认得准不准（判定 + 归因 + 通过率；改了 OCR 就必须跑，不涨就撤）
@@ -304,7 +311,7 @@ python -X utf8 -m snapword.cli ask serendipity "它和 luck 的区别？"
 set SNAPWORD_DEMO=serendipity & set SNAPWORD_SHOT=F:\SnapWord\tmp\card.png
 set SNAPWORD_DEMO=ocr:quixotic & set SNAPWORD_SHOT=F:\SnapWord\tmp\card.png
 set SNAPWORD_DEMO=dock-expanded & set SNAPWORD_SHOT=F:\SnapWord\tmp\dock.png
-:: 真问一句、真流式回答（要等 14 秒），截图里应该能看到"你："和"AI（本地 9B）："
+:: 真问一句、真流式回答（要等 14 秒），截图里应该能看到"你："和"AI（免费云端）："
 set SNAPWORD_DEMO=chat:serendipity & set SNAPWORD_ASK=它和 luck 有什么区别？ & set SNAPWORD_SHOT=F:\SnapWord\tmp\chat.png
 python -m snapword.cli gui
 ```
@@ -380,3 +387,56 @@ gh release create v0.1.0beta "C:\Users\<你>\Desktop\SnapWord-v0.1.0beta.zip" ^
 - 面板展开/收起、卡片进出场、卡片长高都做了动画（见 `docs\UI-STYLE.md`）；还剩
   托盘菜单和设置对话框的进出场没做（那俩是系统 QMenu / QDialog，动画收益小、风险大）。
 - Qt 会往 stderr 打一行 `setGeometry` 警告，无害。
+
+## 公开仓库的默认值：不假设别人有本地模型（2026-10-05）
+
+User said (m11860): "把github项目的readme收拾一下。我想纠正一下，别人根本对我本地的9B完全不在意，
+不要搞得跟谁都有本地模型一样。真的没有办法能让这个东西直连到什么免费模型上面然后做解释吗"。
+
+之前所有文案（README、设置窗、按钮 tooltip）都把"本地 9B"当默认路径写 —— 那是**我这台机器**的
+默认路径，不是别人的。别人 clone 下来：没 Ollama、没 key，于是「详解」一个字都出不来。
+
+- **新增 `providers.pollinations`**（默认 `enabled: true`，`url: https://text.pollinations.ai/openai`，
+  `model: openai-fast`）：**零注册、零 key**，`POST /openai` 能回真文本（OpenAI 兼容体）。
+  `providers.pollinations_chat/_stream` 就是拿空 key 走 `chat/chat_stream`（`chat()` 在 key 为空时
+  **不加 Authorization 头**，正好对上它的匿名档）。
+  **模型名是个坑**：它 `/models` 里标 `tier=anonymous` 的只有 `openai-fast`；填 `openai` 那类要 token
+  的档匿名一律 **402**。它自己抽风时报 402（限流）或 500（后端满，实测见过 `ENOSPC`），
+  所以 `lookup` 给免费通道的 timeout 比别的短（chat 60s / stream 120s）——它挂住时是一个字节都不吐，
+  让人对着"正在想…"等 300 秒是最糟的失败方式。
+- **`providers.ollama.enabled` 默认改成 `false`**。装了的人自己打开（他本机的 config.json 里本来就是
+  显式 true，不受影响）。
+- 排队规则（`lookup.ask_plan` / `lookup.detail`）：带 key 的联网模型 → 本地 9B（在跑）→ 免费云端；
+  `_detail_offline` / 两条 RuntimeError 都改成"先去开免费云端"的口径。
+- **取舍要写在明处**：免费通道意味着**查的词和问题会经过 pollinations 的服务器**，所以 README 里
+  明写了这一点，并用 `SOURCE_LABEL` 让卡片上的来源行自报"免费云端…仅供参考"，不冒充精品解释。
+- 文案统一：设置窗那三格从「DeepSeek 地址/模型/Key」改成「联网模型 地址/名称/Key」——
+  它本来就是任何 OpenAI 兼容服务（智谱 GLM-4-Flash、硅基流动、DeepSeek 官方都行），
+  拿 DeepSeek 当填入示例。
+- 回归：`tests/test_core.py::test_free_cloud_covers_machines_without_any_local_model_or_key`
+  钉住四件事 —— 默认配置开着两家免费通道、关着 ollama；没 key 没本地模型时 `ask_plan` 选 **kilo**；
+  **kilo 挂了自动退到 pollinations**（两家免费通道的意义就在这）；只开 pollinations 的老配置仍落到它头上。
+
+### 2026-10-05 追加：免费通道从一条变两条（kilo 排前面）
+
+用户问"真的没有能白嫖的办法了吗" —— 于是把 keyless 的端点挨个实测了一遍（都是**不带任何 key**
+真发请求）：
+
+- **`kilo.ai` 网关**（`POST https://api.kilo.ai/api/gateway/chat/completions`，`model: kilo-auto/free`）
+  → **200 + 正常中文词典体**，流式也是标准 OpenAI `delta.content`（实测连发两问都对），
+  限额 **200 次/小时/IP**，国内直连可用。→ 因此把它排在 pollinations **前面**（`providers.FREE_ORDER`）。
+  坑：`kilo-auto/free` 背后是个会先写 `reasoning` 的模型，**给它小的 `max_tokens` 会出现全推理、
+  content 空的回包**（我用 `max_tokens=200` 试词典体就中过）；SnapWord 这两条路本来就不传 max_tokens，
+  所以没事，但要记着别以后手贱去加。
+- `pollinations` → 同一时段 6 次里 5 次 **402/500（ENOSPC）**，保留为备用。
+- `OVHcloud` 匿名档 → `/models` 200，但 chat 直接 **429**（全匿名共享 2 次/分钟），太挤，不接。
+- `VLM Run` → 现在匿名也要 token（列表里的"no key"已过期）；`uncloseai` → 域名解析不了；
+  `Hack Club AI` → 404；**DuckDuckGo Duck.ai**（`x-vqd-4` 那条路）→ 国内连接超时（被墙），
+  对一个面向国内用户的 README 没用。
+- 结论：**零注册零 key 且国内直连可用的，就只有 kilo 和 pollinations 这两条**（都接了、按顺序换手）；
+  再稳一档就必须注册拿 key（智谱 GLM-4-Flash、硅基流动的免费档）。
+
+实现形状：`providers.FREE_ORDER = ("kilo", "pollinations")` + `providers.free_chat/free_chat_stream(name, p, msgs)`
+（**按名字现查 dict，所以测试里 monkeypatch `providers.kilo_chat` 仍然生效** —— 别改成模块级 dict 常量，
+那样 patching 就失效了）；`lookup._free_list()` 按顺序返回开着的那些，`_brief_llm`/`detail` 逐个试、
+第一家成功就用它，全挂才写 `免费云端（名字）没答上：…`。`ask_plan` 取列表第一个。

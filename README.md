@@ -34,13 +34,25 @@ powershell -ExecutionPolicy Bypass -File helper\build-ocr.ps1
 要求：Windows 10/11 x64 + Python 3.10+（自带 `csc.exe` 或 .NET Framework 4 就能编 helper）。
 `PySide6-Essentials` 选 6.11 以上是因为旧的装不上 Python 3.14。
 
-## 释义从哪来（**以词典 / 有道为准，LLM 只负责展开**）
+## 释义从哪来（**以词典 / 有道为准，模型只负责展开**）
+
+前三条是"词本身"的释义，默认全都不用你配：
 
 1. **离线词典 ECDICT**（`data\ecdict.db`，77 万条）—— 快路径主力，零延迟零 token
 2. **有道免费接口**（`aidemo.youdao.com/trans`）—— 离线没命中时顶上；命中了就作为对照补一行
 3. **百度翻译**（可选，要自己去 `fanyi-api.baidu.com` 免费领 appid + 密钥）—— 有道也不给结果时的第三家
-4. **本地 9B**（Ollama `qwen3.5:9b`）—— 免费出初稿、答疑、整理格式
-5. **DeepSeek**（可选，要 key）—— 只在「必须准且详细」的那一问才用
+
+「详解」和「问 AI」那部分要一个模型，**默认的这两条不用注册、不用 key**（按顺序试，前面限流就换后面）：
+
+4. **免费云端 kilo.ai 网关** —— 默认开着：不用注册、不用 key，限额 200 次/小时/IP
+   （`providers.kilo`，实测中文词典体回得很正）
+5. **免费云端 pollinations.ai** —— 默认开着，备用那条：它同样不用 key，但是个公共端点，
+   限流/抽风比上一条频繁（见下面「网络」那节）
+   代价说在前面：**你查的词和问题会经过这三方的服务器**；不想要就把这两格关掉
+   （`providers.kilo.enabled` / `providers.pollinations.enabled`），关掉之后下面的本地/联网模型照样能用
+6. **本地 9B**（可选）—— 本机装了 Ollama 才会用：免费、不出网、不花 token，在跑的就在联网之前先派它
+7. **联网模型**（可选，要 key）—— 任何 OpenAI 兼容服务都填这一格：DeepSeek、智谱 GLM-4-Flash、
+   硅基流动…，填了 key 它排最前，最稳也最好
 
 ## 三条硬要求怎么落实的
 
@@ -48,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File helper\build-ocr.ps1
 | --- | --- |
 | 不抢焦点 | 卡片是 `Qt.Tool + WA_ShowWithoutActivating`，`show()` 之后**不调用** `activateWindow()`；只有你自己点「问 AI」才把键盘交过去 |
 | 快 | 热键按下**先抓整屏**（所以遮罩不会拍到自己），词典结果直接在本地出（查一次 ~0.1 ms）；联网和 LLM 全在后台线程 |
-| 省 token | 结果按词进 `data\cache.db`，同一个词只查一次；DeepSeek 只在你点「详解」或按住 Shift 提问时才发 |
+| 省 token | 结果按词进 `data\cache.db`，同一个词只查一次；模型只在你点「详解」或问 AI 时才发（默认那条是免费云端，不花你的钱） |
 
 | 热键 | 作用 |
 | --- | --- |
@@ -83,12 +95,13 @@ powershell -ExecutionPolicy Bypass -File helper\build-ocr.ps1
 
 ![问 AI](docs/card-chat.png)
 
-谁来答：**本地 9B 优先**（免费、不花 token、不联网）；本地 Ollama 没在跑的时候
-**自动改用 DeepSeek**（填了 key 就管用）—— 所以没装本地模型的机器上也照样能问答。
-想强制走 DeepSeek：按住 `Shift` 点「发送」。两边都没配时不会静默失败，气泡里会直说该去哪儿填。
+谁来答（**从免费的开始排队**）：本机 Ollama 在跑就先用它；填了 Key 的**联网模型**排最前
+（词典命中得好的词优先给它）；都没有就走**免费云端**（kilo.ai / pollinations.ai，不用注册不用 key，
+clone 下来就能问 —— 代价是问题会经过它们的服务器）。想强制走联网模型：按住 `Shift` 点「发送」。
+三个都没配时不会静默失败，气泡里会直说该去哪儿开。
 
 同一张卡片里的追问带上下文（最近 8 条），换个词查就清空。提问前会先探一下
-`/api/tags`，模型不在跑就直接转网，不至于让你对着空气等一个 180 秒的超时。
+`/api/tags`，模型不在跑就直接转网，不至于让你对着空气干等一个超时。
 
 命令行也能单独用（排查问题时最方便）：
 
@@ -123,7 +136,7 @@ src\snapword\
   gui.py        悬浮卡片 + 屏幕右边缘的常驻面板（PySide6）：热键、框选遮罩、卡片、托盘、设置
   lookup.py     查词管线：快路径 → 慢路径 → 答疑
   ecdict.py     离线词典（含粗糙但够用的词形还原）
-  providers.py  Ollama / DeepSeek / 有道 / MyMemory（只用标准库 urllib）
+  providers.py  免费云端（kilo / pollinations）/ Ollama / 联网模型（任何 OpenAI 兼容服务）/ 有道 / MyMemory（只用标准库 urllib）
   ocr.py        调 helper\ocr-helper.exe
   cache.py      按词缓存（SQLite）
   winput.py     全局热键、SendInput 发 Ctrl+C、前台窗口类名（纯 ctypes）
@@ -133,11 +146,11 @@ models\         OCR 模型（不提交，用下面那个脚本下）
 tools\fetch_dict.py   下 182 MB 的离线词库（走 npm 镜像，1.5 秒）
 tools\fetch_ocr_model.py  下 OCR 模型（快模型 5MB 秒下；--model ppocrv5-server 是那 165MB 的准模型）
 tools\ocr_bench.py    OCR 识别能力的自迭代测试台（判定 + 归因 + 报告）
-tools\ocr_audit.py    OCR 失败反思：把失败条目交给本地 9B 说病因/下一步（不用联网）
+tools\ocr_audit.py    OCR 失败反思：把失败条目交给本地 9B 说病因/下一步（可选，本机得装了 Ollama）
 tools\make_icon.py    生成 assets\snapword.ico（和托盘图标同一套画法，桌面快捷方式用）
 assets\snapword.ico   应用图标（想在桌面放快捷方式就指到 .venv\Scripts\pythonw.exe -m snapword.gui）
-tests\test_core.py    裸断言，无框架：python tests\test_core.py（查词/缓存/兜底）
-tests\test_ui.py      界面与交互的裸断言（headless，33 条）：python tests\test_ui.py
+tests\test_core.py    裸断言，无框架：python tests\test_core.py（查词/缓存/兜底/通道排队，27 条）
+tests\test_ui.py      界面与交互的裸断言（headless，66 条）：python tests\test_ui.py
 tests\run_all.py      自我评测总入口：python tests\run_all.py --min 100（当回归闸门用）
 docs\          截图 + UI-STYLE.md（配色令牌/动效）+ SELFTEST.md（评测报告）
 ```
@@ -156,8 +169,9 @@ docs\          截图 + UI-STYLE.md（配色令牌/动效）+ SELFTEST.md（评�
 
 **这份分只能证明"我列出来的这些项没退化"，不能证明界面好看**——断言是我自己写的，
 覆盖不到的地方照样会丑。它是回归闸门，不是审美裁判：看不顺眼的地方要补成新断言，
-再让改动去满足它。\          截图 + UI-STYLE.md（配色令牌/动效）+ OCR-NOTES.md（识别实测记录）
-```
+再让改动去满足它。
+
+## OCR（复用 SnapWheel 的 C# 源码）
 
 OCR 是**复用 SnapWheel 的 C# 源码**编出来的 `helper\ocr-helper.exe`，两个引擎 + 两套模型：
 
@@ -196,7 +210,7 @@ JSON 里多打 `iw/ih/pw/ph` 告诉你补边前后的尺寸。这也是为什么
 ## 自检（改完代码跑这几条）
 
 ```bat
-F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py   :: 23 个裸断言
+F:\SnapWord\.venv\Scripts\python.exe F:\SnapWord\tests\test_core.py   :: 27 条裸断言
 
 :: 让 GUI 自己弹一张卡片，把卡片渲染成 PNG 后退出 —— 不用手动点，也不抓屏
 set SNAPWORD_DEMO=serendipity & set SNAPWORD_SHOT=F:\SnapWord\tmp\card.png
@@ -246,7 +260,10 @@ python tools\ocr_bench.py run                              :: 判定 + 按错法
 失败会按"错成什么样"归成空 / 只有一个字 / 太短 / 截断 / 丢开头 / 中文错字 / 空格差 / 字符替换，
 每一类都给出下一步该试什么。完整实测记录见 `docs\OCR-NOTES.md`。
 
-### 「归类」之后的下一步，交给本机那个 9B 想
+### 「归类」之后的下一步，交给本机那个 9B 想（可选，开发用）
+
+> 这一节是给我自己调 OCR 用的：**要本机装了 Ollama 才跑得起来**，没装跳过就好，
+> 和查词、「详解」、「问 AI」都不相干。
 
 归类是**正则**做的（错成什么样 → 该试什么），它分不出「同一类错、不同原因」：
 10px 的英文和 1690×46 的整行中文都会归到"截断"，但该试的东西完全不同。
@@ -273,10 +290,34 @@ GitHub 在国内慢得没法用（`github.com` ~50 KB/s，`raw.githubusercontent
 所以 182 MB 的离线词库走 npm 上的 `node-ecdict-sqlite-lastest` 包（见 `tools\fetch_dict.py`），
 1.5 秒下完；ECDICT 仓库自带的 csv / release zip 那条路已经废弃，别回头。
 
+免费云端那两条在国内都是**直连可用**的，都实测过不带任何 key 就回 200 真文本
+（同一时刻智谱和硅基流动都还在要 Authorization）：
+
+- **`kilo.ai` 网关**（默认先试它）：`POST https://api.kilo.ai/api/gateway/chat/completions`，
+  `model: kilo-auto/free`（让它自己在免费档里挑），限额 **200 次/小时/IP**。实测它对
+  "一行一个义项"的中文词典提示回得很正、流式也正常，所以让它排在前面。
+- **`pollinations`**（备用）：`POST https://text.pollinations.ai/openai`。
+
+两个实测细节，遇到报错时对号入座：
+
+- pollinations 的匿名档模型名只能是 **`openai-fast`**（它 `/models` 里标 `tier=anonymous`
+  的那个）；填 `openai` 那种要 token 的档，匿名请求一律 **402**。
+- 它自己抽风时报的是 **402**（限流）或 **500**（它后端满，实测出现过 `ENOSPC`）——
+  这种时候 kilo 那条会接上（两家都开着就会自动换手）。两张都挂了才会在卡片上写
+  「免费云端（…）没答上：…」，**不是你的配置坏了** —— 它会退回词典释义，并告诉你下一步怎么填 key。
+
 ## 配置 `config.json`
 
 `hotkey` / `hotkey_selection` / `ocr_engine` / `ocr_dir` / `ocr_dir_strong` / `auto_detail` / `dock` / `providers.*`。
-DeepSeek 的 key 填了才会启用（`enabled` 自动跟着 key 走）。GUI 里有「设置…」。
+`providers` 里那几格各管一段：
+
+- **`kilo`** —— 默认开着，不用注册也不用 key（免费云端的首选；关掉 = `enabled: false`）
+- **`pollinations`** —— 默认开着，不用注册也不用 key（免费云端的备用；关掉 = `enabled: false`）
+- **`ollama`** —— 默认关着（**别人机器上不会有这个东西**），装了 Ollama 再打开
+- **`deepseek`** —— 名字叫 deepseek，其实**任何 OpenAI 兼容服务**都填这一格：地址 / 模型名 / key。
+  智谱 GLM-4-Flash、硅基流动、DeepSeek 官方都行；key 填了才会启用（`enabled` 自动跟着 key 走）。
+
+GUI 里有「设置…」，最后三格都能在界面里改（那两格免费云端在 config 里改）。
 `dock` = `{enabled, expanded, y, screen}`，前三个都是你操作时自动写回去的（`y: null` = 竖直居中）；
 `screen` 只在设置/托盘菜单里显式选屏时才写，`null` = 主屏（**别再改成"鼠标所在那块屏"** ——
 鼠标在副屏时面板就跟着跑到副屏，用户报过这个）。
@@ -290,7 +331,10 @@ DeepSeek 的 key 填了才会启用（`enabled` 自动跟着 key 走）。GUI �
 - `auto_detail` 默认关：详细解释（卡片上的「详解」）要你点一下才生成，省钱。
 - 崩了/卡片不出来：看 `data\snapword.log`。pythonw 启动时没有控制台，所以启动那行、
   未捕获异常、QThread 里的异常都写到那儿（启动器里已经装好这个钩子了）。
-- 词形还原是后缀规则拼的，不是词典反查；查不到原形时靠 9B 兜底。
+- 词形还原是后缀规则拼的，不是词典反查；查不到原形时靠模型兜底。
+- 免费云端（kilo / pollinations）都是公共端点：**别指望它快，也别指望它永远在**。要稳就填自己的 key
+  （见上面的 `providers`），或者本机跑 Ollama。它答得不好时，卡片上那句来源会写明是哪条免费通道
+  —— 不会冒充"精品解释"。
 - 卡片弹出时 Qt 会往 stderr 打一行 `QWindowsWindow::setGeometry: Unable to set geometry ...`
   的警告（无边框 + 半透明背景的取整问题），不影响显示；用 pythonw 启动时看不到。
 - 卡片和常驻面板是**分层窗口**（`WA_TranslucentBackground`），所以**截图工具/`grabWindow(0)`

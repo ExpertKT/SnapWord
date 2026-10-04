@@ -1,7 +1,9 @@
-"""外部数据源：本地 9B(Ollama) / DeepSeek / 有道 / 百度翻译 / MyMemory。
+"""外部数据源：免费云端 / 本地 9B(Ollama) / DeepSeek / 有道 / 百度翻译 / MyMemory。
 
 只用标准库（urllib），所以除了 PySide6 没有别的依赖。
 有道和 MyMemory 的地址与参数是从 SnapWheel 的 57-Translate.cs 抄来的（同一个免费接口）。
+pollinations / kilo 是**不用注册、不用 key** 的免费云端：都 OpenAI 兼容，接在 chat()/chat_stream()
+上，所以别人 clone 下来什么都不用配就能用「详解」和「问 AI」（一家限流就换另一家）。
 """
 import hashlib
 import json
@@ -90,6 +92,48 @@ def deepseek_chat_stream(p, messages, timeout=180):
     if not p.get("key"):
         raise RuntimeError("没填 DeepSeek key")
     return chat_stream(p["url"], p["key"], p["model"], messages, timeout=timeout)
+
+
+def kilo_chat(p, messages, timeout=60):
+    """免费云端（kilo.ai 网关）：不用注册、不用 key。
+
+    和 pollinations 一个路子（OpenAI 兼容、空 key 就是匿名），但实测它更抗造：
+    同样的中文词典提示，它稳定回正体（pollinations 那阵子 6 次里 5 次 402/500）。
+    限额 200 次/小时/IP。
+    """
+    return chat(p["url"], "", p["model"], messages, timeout=timeout)
+
+
+def kilo_chat_stream(p, messages, timeout=120):
+    return chat_stream(p["url"], "", p["model"], messages, timeout=timeout)
+
+
+def pollinations_chat(p, messages, timeout=60):
+    """免费云端（pollinations.ai）：不用注册、不用 key、不用在本机跑任何东西。
+
+    它本身就是 OpenAI 兼容的，所以直接走 chat()。超时给得比本地模型短 —— 这是在线的
+    第三方免费通道，卡住就该赶紧失败，让调用方去说人话，而不是让用户对着转圈发呆。
+    """
+    return chat(p["url"], "", p["model"], messages, timeout=timeout)
+
+
+def pollinations_chat_stream(p, messages, timeout=120):
+    return chat_stream(p["url"], "", p["model"], messages, timeout=timeout)
+
+
+# 免费通道的名单与优先顺序。lookup 按这个顺序排队，一家限流/抽风就退到下一家；
+# 这里只管"名字怎么调"，顺序的意义在那儿。（加一家：这里 + free_chat + config.DEFAULTS）
+FREE_ORDER = ("kilo", "pollinations")
+
+
+def free_chat(name, p, messages, timeout=60):
+    return {"kilo": kilo_chat, "pollinations": pollinations_chat}[name](
+        p, messages, timeout=timeout)
+
+
+def free_chat_stream(name, p, messages, timeout=120):
+    return {"kilo": kilo_chat_stream, "pollinations": pollinations_chat_stream}[name](
+        p, messages, timeout=timeout)
 
 
 _OLLAMA_UP = {}

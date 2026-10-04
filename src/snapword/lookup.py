@@ -2,10 +2,11 @@
 
 设计原则（用户拍板）：
   · 释义的权威源是词典（ECDICT）和有道，LLM 只负责"展开"；
-  · 本地 9B 干粗活（初稿/答疑/格式化），免费的；
-  · 只有"必须准且详细"的那一问才发给 DeepSeek；
+  · 模型按"免费/不出网在前"排队：本机 Ollama（装了才用）→ 填了 key 的联网模型 → 免费云端（kilo / pollinations）；
+  · 免费云端不用注册不用 key，所以别人 clone 下来不做任何配置也能用详解和答疑；
   · 同一个词只查一次，结果进缓存。
 """
+import functools
 import re
 import time
 
@@ -22,6 +23,14 @@ _OCR_TOK = re.compile(r"[A-Za-z][A-Za-z'\u2019\-]{0,40}")
 # 详解最多等多久。原来写 300 秒 —— 模型冷加载 + 慢机器上那就是用户眼里的"卡死"，
 # 而卡片上只有一句「生成中…」，分不清是在想还是已经死了。冷启动实测 13 秒。
 DETAIL_TIMEOUT = 120
+
+# 详解/问答来源的人话名字。卡片上要写清"这段话是谁说的"，尤其免费通道只是参考。
+SOURCE_LABEL = {
+    "deepseek": "DeepSeek",
+    "ollama": "本地 9B（免费，仅供参考）",
+    "kilo": "免费云端 kilo.ai（不用 key，仅供参考）",
+    "pollinations": "免费云端 pollinations.ai（不用 key，仅供参考）",
+}
 
 
 DETAIL_SYS = (
@@ -60,7 +69,7 @@ class Lookup:
 
     # ---------------- 快路径 ----------------
     def brief(self, text, allow_network=True):
-        """立刻能给用户看的东西。先缓存，再离线词典，再有道，最后本地 9B 兜底。"""
+        """立刻能给用户看的东西。先缓存，再离线词典，再有道，最后让模型兜底出个初稿。"""
         t = (text or "").strip()
         if not t:
             raise ValueError("空文本")
@@ -226,26 +235,38 @@ class Lookup:
         return self._youdao_of(t)
 
     def _brief_llm(self, t):
-        """词典和免费接口都没命中：让本地 9B 出个初稿，先把东西显示出来。"""
+        """词典和免费接口都没命中：让模型出个初稿，先把东西显示出来。
+
+        本地 9B 在跑就用它（免费、不出网）；没装本地模型的机器上退到免费云端
+        （kilo / pollinations，都不用 key）—— 别人 clone 下来不该先被要求装个模型。
+        """
         p = self.cfg["providers"]["ollama"]
+        tries = []
         # 先探一下再发请求：ollama 没在跑时这里是几秒的失败，而不是干等 60 秒超时。
-        if not p.get("enabled") or not providers.ollama_up(p.get("url", "")):
+        if p.get("enabled") and providers.ollama_up(p.get("url", "")):
+            tries.append((providers.ollama_chat, p, "ollama", "本地模型"))
+        tries += [(functools.partial(providers.free_chat, name), prov, name, "免费云端")
+                  for name, prov in self._free_list()]
+        if not tries:
             return None
-        try:
-            out = providers.ollama_chat(
-                p,
-                [
-                    {"role": "system", "content": "你在做英汉词典的初稿。只输出释义本身，一行一个义项，"
-                                                  "格式「词性. 中文释义」。查不到这个词就只输出：UNKNOWN"},
-                    {"role": "user", "content": t},
-                ],
-                timeout=60,
-            )
-        except Exception as ex:
+        msgs = [
+            {"role": "system", "content": "你在做英汉词典的初稿。只输出释义本身，一行一个义项，"
+                                          "格式「词性. 中文释义」。查不到这个词就只输出：UNKNOWN"},
+            {"role": "user", "content": t},
+        ]
+        out, src, who, why = None, None, None, ""
+        for call, prov, src, who in tries:
+            try:
+                # 免费通道两家各 45 秒（它们挂住时是一个字节都不吐）；最坏加起来仍在一分钟出头
+                out = call(prov, msgs, timeout=45 if src in providers.FREE_ORDER else 60)
+                break
+            except Exception as ex:
+                out, why = None, who + "没答上：" + str(ex)[:120]
+        if out is None:
             return {
                 "kind": "word" if self.is_word(t) else "phrase",
                 "query": t, "cn": [], "en": "", "phonetic": "", "exchange": "", "tags": [],
-                "notes": ["本地模型没答上：" + str(ex)[:120]],
+                "notes": [why],
                 "source": "none",
             }
         if "UNKNOWN" in out.upper() and len(out) < 40:
@@ -258,13 +279,17 @@ class Lookup:
             "phonetic": "",
             "exchange": "",
             "tags": [],
-            "notes": ["本地 9B 初稿（未经词典核对）"],
-            "source": "ollama",
+            "notes": [who + "初稿（未经词典核对）"],
+            "source": src,
         }
 
     # ---------------- 慢路径 ----------------
     def detail(self, brief):
-        """详细的展开。已经缓存过就直接给；否则本地 9B 出稿，DeepSeek 可用时用它定稿。"""
+        """详细的展开。已经缓存过就直接给；否则拿词典释义去让模型出稿。
+
+        谁出稿：本地 9B（装了才在）→ 填了 key 的联网模型（词典命中得好的词优先给它）→
+        免费云端（kilo / pollinations，都不用 key，谁都能用）。
+        """
         word = brief.get("query") or brief.get("lexeme") or ""
         if self.cache:
             hit = self.cache.get(word)
@@ -274,13 +299,15 @@ class Lookup:
         msgs = self._detail_messages(brief)
         p = self.cfg["providers"]["ollama"]
         ds = self.cfg["providers"]["deepseek"]
+        free = self._free_list()
         can_ds = bool(ds.get("enabled") and ds.get("key"))
         use_ds = brief.get("source") == "ecdict" or brief.get("prefer") == "deepseek"
         local_up = bool(p.get("enabled")) and providers.ollama_up(p.get("url", ""))
+        free_on = bool(free)
 
         # 一个模型都接不上就别去等超时：直接把词典里有的摊开，并说清怎么才能用上详解。
         # （这类用户没有本地 9B、也不打算去申请 DeepSeek key —— 不能让他们对着转圈发呆。）
-        if not (can_ds or local_up):
+        if not (can_ds or local_up or free_on):
             return self._detail_offline(brief, "")
 
         text, src, why = None, None, ""
@@ -296,11 +323,20 @@ class Lookup:
             except Exception as ex:
                 why = "本地模型没答上：" + str(ex)[:80]
         if text is None:
+            for name, prov in free:
+                try:
+                    # 免费云端是公共端点，会直接挂住不吐字（实测 pollinations 后端 ENOSPC
+                    # 时就这样），所以不给它和"自家 key / 本机模型"一样长的绳子；
+                    # 一家挂了（限流/抽风）就换下一家，这正是排两家免费通道的意义 ——
+                    # 45 秒 × 最多两家，最坏也比"对着正在整理…干等"短。
+                    text, src = providers.free_chat(name, prov, msgs, timeout=45), name
+                    break
+                except Exception as ex:
+                    why = "免费云端（%s）没答上：" % name + str(ex)[:80]
+        if text is None:
             return self._detail_offline(brief, why)
 
-        text = "> 详解来源：%s（词典释义为准）\n\n" % (
-            "DeepSeek" if src == "deepseek" else "本地 9B（免费，仅供参考）"
-        ) + text
+        text = "> 详解来源：%s（词典释义为准）\n\n" % SOURCE_LABEL.get(src, src) + text
         if self.cache:
             self.cache.put_detail(word, text)
         return text
@@ -321,9 +357,13 @@ class Lookup:
         if brief.get("tags"):
             out += ["**考试标签**", "", " ".join(brief["tags"]), ""]
         out += ["---", "",
-                "想要展开成六段详解（逐义项 / 搭配 / 例句 / 辨析 / 记忆法），两条路任选一条：",
-                "1. 本机装 Ollama 跑个小模型（免费、不出网），SnapWord 会自动用它；",
-                "2. 或在右下角「设置…」里填 DeepSeek key（几块钱能用很久）。"]
+                "想要展开成六段详解（逐义项 / 搭配 / 例句 / 辨析 / 记忆法），任选一条：",
+                "1. 免费云端：`config.json` 里 `providers.kilo.enabled`（备用 `providers.pollinations.enabled`）"
+                " 保持 true 就行"
+                "（不用注册、不用 key）—— 它没答上多半是网络问题，过会儿再试；",
+                "2. 本机装 Ollama 跑个小模型（免费、不出网），SnapWord 会自动用它；",
+                "3. 或在右下角「设置…」里填任意一家 OpenAI 兼容服务的 key（智谱 GLM-4-Flash、"
+                "硅基流动也有免费档，DeepSeek 几块钱能用很久）。"]
         return "\n".join(out)
 
     def _detail_messages(self, brief):
@@ -357,11 +397,13 @@ class Lookup:
     def ask_plan(self, brief, question, history=None, escalate=False):
         """这一问交给谁答，返回 (来源名, provider 配置, messages)。
 
-        本地 9B 优先（免费，不花 token）；本地 ollama 没在跑就**自动**改成联网的 DeepSeek
-        （只要填了 key）—— 没本地模型的机器上也照样能问。都没配就抛一句能照做的人话。
+        本地 9B 在跑就优先用它（免费、不出网、不花 token）；没在跑就自动往下降：
+        填了 key 的联网模型 → 免费云端（kilo / pollinations，都不用 key，开箱即用）。
+        所以「没装本地模型」的机器上也照样能问答，而且不用先去申请什么。
         """
         p = self.cfg["providers"]["ollama"]
         ds = self.cfg["providers"]["deepseek"]
+        free = self._free_list()
         can_ds = bool(ds.get("enabled") and ds.get("key"))
         msgs = self._chat_messages(brief, question, history)
         if escalate and can_ds:
@@ -370,33 +412,62 @@ class Lookup:
             return "ollama", p, msgs
         if can_ds:
             return "deepseek", ds, msgs
+        if free:
+            name, prov = free[0]
+            return name, prov, msgs
         if not p.get("enabled"):
             raise RuntimeError(
-                "没有能答话的模型：本地模型被关掉了，DeepSeek key 也没填。"
-                "点右下角「设置…」填一个就能用。")
+                "没有能答话的模型：本地模型被关掉了，免费云端也关着，联网模型的 key 也没填。"
+                "点右下角「设置…」填一个，或把 config.json 里 providers.kilo.enabled "
+                "改回 true 就能用免费云端。")
         raise RuntimeError(
-            "本地模型（%s）没在跑，DeepSeek key 也没填。"
-            "要么开 ollama serve，要么在「设置…」里填 DeepSeek key。"
+            "本地模型（%s）没在跑，免费云端也关着，联网模型的 key 也没填。"
+            "要么开 ollama serve，要么把 config.json 里 providers.kilo.enabled 改回 "
+            "true（免费、不用注册），要么在「设置…」里填一个 key。"
             % p.get("url", ""))
 
     def ask(self, brief, question, history=None, escalate=False):
         """一次拿完整答案，返回 (文本, 来源)。CLI 和测试用这个。"""
         src, prov, msgs = self.ask_plan(brief, question, history, escalate)
-        fn = providers.deepseek_chat if src == "deepseek" else providers.ollama_chat
-        return fn(prov, msgs, timeout=180), src
+        free = src in providers.FREE_ORDER
+        if src == "deepseek":
+            fn = providers.deepseek_chat
+        elif free:
+            fn = functools.partial(providers.free_chat, src)
+        else:
+            fn = providers.ollama_chat
+        return fn(prov, msgs, timeout=90 if free else 180), src
 
     def ask_stream(self, brief, question, history=None, escalate=False):
         """流式版：先 yield ("src", 来源名)，再一段段 yield ("text", 片段)。"""
         src, prov, msgs = self.ask_plan(brief, question, history, escalate)
         yield ("src", src)
-        fn = providers.deepseek_chat_stream if src == "deepseek" else providers.ollama_chat_stream
-        for piece in fn(prov, msgs, timeout=300):
+        free = src in providers.FREE_ORDER
+        if src == "deepseek":
+            fn = providers.deepseek_chat_stream
+        elif free:
+            fn = functools.partial(providers.free_chat_stream, src)
+        else:
+            fn = providers.ollama_chat_stream
+        # 免费公共端点给短一点的绳子：它挂住的时候是一个字节都不吐（不是慢慢吐），
+        # 让用户对着"正在想…"等 300 秒是最糟的失败方式
+        for piece in fn(prov, msgs, timeout=120 if free else 300):
             if piece:
                 yield ("text", piece)
 
     # ---------------- 小工具 ----------------
     def _on(self, name):
         return bool(self.cfg["providers"].get(name, {}).get("enabled"))
+
+    def _free_list(self):
+        """零注册零 key 的免费云端那一排，按 providers.FREE_ORDER 的顺序。
+
+        老配置文件里没有某一格就当它关着；两格都开着时先试 kilo（实测更抗造），
+        它限流/抽风再退到 pollinations。
+        """
+        return [(name, self.cfg["providers"].get(name) or {})
+                for name in providers.FREE_ORDER
+                if (self.cfg["providers"].get(name) or {}).get("enabled")]
 
     def _youdao_of(self, text):
         if text not in self._youdao:

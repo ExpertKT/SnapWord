@@ -328,6 +328,51 @@ def test_ask_plan_prefers_local_then_falls_back_to_deepseek():
         P.ollama_up = old
 
 
+def test_free_cloud_covers_machines_without_any_local_model_or_key():
+    """别人 clone 下来：没本地模型、没 key —— 详解和问答得照样能用（走免费云端）。
+
+    这是门面问题：对方不欠我一个本地 9B，也不该被要求先去注册什么。
+    """
+    from snapword import config, providers as P
+
+    # 默认配置本身就得开着免费通道、关着本地模型
+    d = config.DEFAULTS["providers"]
+    assert d["kilo"]["enabled"] and d["kilo"]["url"].endswith("/chat/completions")
+    assert d["kilo"]["model"] == "kilo-auto/free", d["kilo"]["model"]
+    assert d["pollinations"]["enabled"] and d["pollinations"]["url"].endswith("/openai")
+    # 模型名必须是匿名档那个（pollinations 的 /models 里 tier=anonymous 的只有 openai-fast）；
+    # 填成 "openai" 那种要 token 的档，匿名请求一律 402 —— 实测踩过
+    assert d["pollinations"]["model"] == "openai-fast", d["pollinations"]["model"]
+    assert not d["ollama"]["enabled"], "本地 9B 不能默认开着：别人机器上没这东西"
+
+    cfg = {"providers": {
+        "kilo": dict(d["kilo"]),
+        "pollinations": dict(d["pollinations"]),
+        "ollama": {"enabled": False, "url": "http://127.0.0.1:11434/v1/chat/completions",
+                   "model": "m"},
+        "deepseek": {"enabled": False, "url": "u", "model": "d", "key": ""},
+    }}
+    lk = Lookup(cfg, dic=object())          # 这两条路都不碰词典，给个占位就行
+    brief = {"query": "run", "cn": ["跑"], "en": ""}
+    assert lk.ask_plan(brief, "问一句")[0] == "kilo", "两家都开着时先试 kilo"
+
+    # 详解这条路：把免费通道换成假的，看它有没有被叫到、来源标签写对没；
+    # 同时钉住"kilo 挂了自动退到 pollinations"这条兜底（两家免费通道的意义就在这）
+    old_kilo, old_poll = P.kilo_chat, P.pollinations_chat
+    try:
+        P.kilo_chat = lambda p, m, timeout=0: (_ for _ in ()).throw(RuntimeError("502"))
+        P.pollinations_chat = lambda p, m, timeout=0: "## 一句话核心意思\n跑"
+        md = lk.detail(brief)
+    finally:
+        P.kilo_chat, P.pollinations_chat = old_kilo, old_poll
+    assert "免费云端" in md and "跑" in md, md
+
+    # 只开 pollinations（老配置文件）时，排队得照旧落到它头上
+    cfg["providers"]["kilo"] = {"enabled": False, "url": "", "model": ""}
+    lk = Lookup(cfg, dic=object())
+    assert lk.ask_plan(brief, "问一句")[0] == "pollinations"
+
+
 def test_baidu_sign_is_md5_of_appid_q_salt_key():
     """百度翻译的签名顺序写错了它只回一个 error_code，所以这里钉住顺序。"""
     import hashlib

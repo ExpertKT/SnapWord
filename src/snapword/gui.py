@@ -4,7 +4,8 @@
   · 不抢焦点 —— WA_ShowWithoutActivating + Qt.Tool，show() 不调用 activateWindow()；
     只有用户自己点进输入框，键盘才归卡片。
   · 快 —— 热键按下先把整屏抓下来（快路径先出词典结果，联网/LLM 都在后台线程）。
-  · 省 token —— 结果按词进 SQLite 缓存，DeepSeek 只在你要"详细解释"或"转 DeepSeek"时才发。
+  · 省 token —— 结果按词进 SQLite 缓存；模型只在你要"详细解释"或"问 AI"时才发，
+    而且默认用免费通道（详见 lookup.py 的排队规则）。
 """
 import html
 import io
@@ -954,6 +955,7 @@ class Card(QtWidgets.QWidget):
         self.brief = None
         self.pinned = False
         self._drag = None
+        self._rest_pos = None           # 入场动画的稳定终点，关闭时从这里平滑离场
         self._drag_w = None             # 拖左右边改宽度时的起点（见 _begin_edge）
         self._drag_h = None             # 拖上下边改高度时的起点（见 _drag_height）
         self.saved = False              # 这个词在不在生词本里（决定「存词」按钮长什么样）
@@ -1141,8 +1143,8 @@ class Card(QtWidgets.QWidget):
         self.chat_in = SmoothLineEdit()
         self.chat_in.setPlaceholderText("就这个词问点什么…（回车发送）")
         self.btn_esc = SmoothButton("发送", "primary")
-        self.btn_esc.setToolTip("回车也是发送。默认本地 9B 答（免费）；答不满意就按住 Shift 点这里，"
-                                "强制转 DeepSeek。")
+        self.btn_esc.setToolTip("回车也是发送。默认免费云端答（本机有 Ollama 就先用它）；"
+                                "答不满意就按住 Shift 点这里，强制走联网模型。")
         h.addWidget(self.chat_in, 1)
         h.addWidget(self.btn_esc)
         self.chat_row.hide()
@@ -1274,6 +1276,7 @@ class Card(QtWidgets.QWidget):
         self.resize(self.width(), self._fit_height())
         self._place(at)
         self._closing = False
+        self._close_done = []
         # 入场过渡走"位置滑动 + 子控件依次淡入（stagger）"，**不走 windowOpacity 动画**：
         # WA_TranslucentBackground + FramelessWindowHint 的顶层窗口在 Windows 上，
         # windowOpacity 动画是出了名的不可靠 —— Qt 官方 bug 库里这类窗口的 opacity 动画
@@ -1405,10 +1408,10 @@ class Card(QtWidgets.QWidget):
         # 不判 btn_detail.isEnabled()：按下去那一刻就把它禁用了，那样第一个 tick 就自杀。
         # 收尾由 set_detail / _on_job_fail 负责停表；卡片没了这个 QTimer 跟着一起销毁。
         n = int(time.monotonic() - self._detail_t0)
-        tip = "正在整理…（本地模型冷启动要十几秒，DeepSeek 快一些）"
+        tip = "正在整理…（本地模型冷启动要十几秒；免费云端一般几秒）"
         if n >= 3:
             tip = ("正在整理…已经 %d 秒。\n\n词典释义在上面；模型那部分本地 9B 冷启动"
-                   "要十几秒，DeepSeek 快一些。" % n)
+                   "要十几秒，免费云端和联网模型快一些。" % n)
         self.detail.show()
         self.detail.setPlainText(tip)
 
@@ -1565,10 +1568,13 @@ class Card(QtWidgets.QWidget):
         self.btn_pin.setText("已钉住" if self.pinned else "钉住")
         self.btn_pin.set_active(self.pinned)        # 激活态淡入/淡出，不是一帧换皮
 
-    def hide_card(self):
+    def hide_card(self, after=None):
         if getattr(self, "_closing", False):
+            if after is not None:
+                self._close_done.append(after)
             return                      # Esc 和 ✕ 一起按、或连按两次 Escape
         self._closing = True
+        self._close_done = [after] if after is not None else []
         # 入场滑入 / 长高还没跑完就点关闭：先把它们掐掉，别一边滑一边淡出。
         # 掐掉长高动画要把 `_resizing` 闸门一并复位——被 stop 的动画不会发 finished，
         # 闸门不复位的话这张卡片以后再也不会长高了（高度永久卡住）。
@@ -1579,17 +1585,24 @@ class Card(QtWidgets.QWidget):
         if not self.isVisible():
             self._really_hide()
             return
-        # 关闭也绕开 windowOpacity（同 show_brief 的注释：这类半透明无边框窗口的
-        # opacity 动画在 Windows 上会跳变/闪黑）。向下 16px 滑出去再藏，
-        # 150ms 足够看出"收走了"，又不会拖泥带水。
+        # 关闭也绕开 windowOpacity（半透明无边框窗口在 Windows 上会闪黑）。始终从
+        # 当前实际位置向下离场，避免打断入场动画时先跳回旧坐标；OutCubic 在末尾
+        # 收住，比 InCubic 在最后一帧突然加速后 hide 更顺滑。
         p = self.pos()
         _anim(self, b"pos", p, QtCore.QPoint(p.x(), p.y() + 16), DUR["fast"],
-              curve=QtCore.QEasingCurve.Type.InCubic, done=self._really_hide)
+              curve=QtCore.QEasingCurve.Type.OutCubic, done=self._really_hide)
 
     def _really_hide(self):
         self.hide()
         self.setWindowOpacity(1.0)      # 下次弹出来还得是正常不透明度
+        callbacks = list(getattr(self, "_close_done", []))
+        self._close_done = []
         self.closed.emit(self)
+        for callback in callbacks:
+            try:
+                callback()
+            except RuntimeError:
+                pass
 
     def keyPressEvent(self, e):
         if e.key() == QtCore.Qt.Key.Key_Escape:
@@ -1718,7 +1731,8 @@ class Card(QtWidgets.QWidget):
         # 无限重排就等于"内容永远透明"（用户视角：点了详解但什么都没有 = 不能正常用）。
         # 所以最多让 4 轮，之后强制淡入——宁可牺牲一次淡入的时序，也不能让内容不出现。
         n = getattr(self, "_reveal_retries", 0)
-        if getattr(self, "_resizing", False) and n < 4:
+        forced = bool(getattr(self, "_resizing", False) and n >= 4)
+        if getattr(self, "_resizing", False) and not forced:
             self._reveal_retries = n + 1
             _later(DUR["fast"], self, self._after_grow)
             return
@@ -1730,7 +1744,14 @@ class Card(QtWidgets.QWidget):
         for w, fade in q:
             try:
                 import shiboken6
-                if shiboken6.isValid(w):
+                if not shiboken6.isValid(w):
+                    continue
+                if forced:
+                    # The bounded fallback is a liveness guarantee, not a
+                    # second animation: delayed timers must not leave content
+                    # stranded at partial opacity indefinitely.
+                    w.setGraphicsEffect(None)
+                else:
                     _fade_in(w, fade)
             except RuntimeError:
                 pass
@@ -2198,93 +2219,346 @@ class Rail(QtWidgets.QFrame):
             p.drawRoundedRect(QtCore.QRectF(0, (h - self._bar) / 2.0, 2, self._bar), 1, 1)
 
 
-class _WordbookFold(QtWidgets.QWidget):
-    """Render the panel hinge with motion-synced content softening."""
+class HingeFoldTransition(QtWidgets.QWidget):
+    """Reusable single-leaf hinge transition with a fixed edge hinge.
 
-    def __init__(self, parent):
+    The supplied pixmap is the leaf itself — it carries the panel snapshot, so
+    the panel must be hidden while the transition runs. progress 1 is the flat
+    leaf sitting exactly where the real panel will return; progress 0 is the
+    leaf standing edge-on (zero projected area, nothing drawn). SnapWord uses a
+    right-edge hinge because its main panel sits immediately to the right.
+    """
+
+    # 快门采样数：12 个姿态才让拖尾读起来是连续的（8 个时还能看出并列的"叠影"）。
+    BLUR_SAMPLES = 12
+
+    def __init__(self, parent=None, *, direction="horizontal", duration=240,
+                 easing="cubic-bezier(0.22, 1, 0.36, 1)", perspective=900,
+                 maxAngle=86, blurAmount=1.2,
+                 blurFrames=3.0, blurMaxPx=72.0,
+                 enableDrag=False):
         super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.direction = direction
+        self.duration = duration
+        self.easing = easing
+        self.perspective = max(200.0, float(perspective))
+        self.maxAngle = max(0.0, min(89.0, float(maxAngle)))
+        self.blurAmount = max(0.0, float(blurAmount))
+        # 快门长度（以动画帧计）：残影铺满"上一帧到这一帧"走过的轨迹的多少帧距离。
+        # 和 blurAmount（叠影浓度）分开，因为"糊多长"和"糊多浓"是两个观感旋钮。
+        self.blurFrames = max(0.0, float(blurFrames))
+        # 拖尾在**屏幕上**的长度上限（像素，量在自由边上）。不按 progress 限幅是因为
+        # 同一个 Δp 在低 p 段被透视放大好几倍，按 p 限会得到一条比叶子还宽的灰浆。
+        self.blurMaxPx = max(0.0, float(blurMaxPx))
+        self.enableDrag = bool(enableDrag)
+        self._anim = None
+        # `_pix` = 内容层（记词板快照，永远平铺、不压扁）；`_lid` = 盖子层（封面画面，
+        # 按投影四边形绕右缘翻转）。两层都铺满自己的矩形，所以这块控件永远不透明。
         self._pix = QtGui.QPixmap()
-        self._soft = QtGui.QPixmap()
+        self._lid = QtGui.QPixmap()
+        self._buffer = None
         self._progress = 0.0
         self._delta = 0.0
+        self._velocity = 0.0
         self._blur_strength = 0.0
+        self._drag_origin = None
+        self._settle_anim = None
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, not self.enableDrag)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
 
-    def start(self, pix, progress):
-        w, h = self.parentWidget().WB_W, self.parentWidget().PANEL_H
-        # QWidget.grab() can return device pixels on a scaled Windows display.
-        # Keep the preview in logical widget coordinates so its last frame is
-        # exactly the same size as the real panel.
+    def start(self, pix, progress=0.0, lid=None):
+        size = pix.deviceIndependentSize().toSize()
+        # 两层：`pix` 是内容层（记词板快照，原样平铺、永不变形），`lid` 是盖子层的
+        # 画面（记词板的"封面"）。展开动画 = 摊平的盖子绕右缘掀开，内容**原地不动**
+        # 地露出来；收起动画 = 盖子压回摊平。传进来的像素必须原样保留，不能再刷一层
+        # 底色，否则内容就成了"一块空板"。
+        # 描边也不补：记词板自己的 QSS 描边（左圆角、右边不描）已经在快照里了，
+        # 再叠一圈 8px 四角描边，交接那一刻右边框和两个右圆角会凭空冒出来，
+        # 和真实面板对不上。
+        # DPR 同样要原样带走：屏幕按 125% 缩放时，按 1.0 渲染等于把画面降采样，
+        # 摊平交回真实面板的瞬间文字会突然变清楚。
+        # 传 null pixmap 时（旧调用方/单测）退回一块实心底色，两层始终不透明。
+        ratio = pix.devicePixelRatio() or 1.0
         image = pix.toImage()
-        if image.size() != QtCore.QSize(w, h):
-            image = image.scaled(w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                                 QtCore.Qt.TransformationMode.SmoothTransformation)
-        image.setDevicePixelRatio(1.0)
+        if image.isNull():
+            image = QtGui.QImage(size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QtGui.QColor(T["surface"]))
+            cover_painter = QtGui.QPainter(image)
+            cover_painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            cover_painter.setPen(QtGui.QPen(QtGui.QColor(T["hairline"]), 1))
+            cover_painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            cover_painter.drawRoundedRect(QtCore.QRectF(0.5, 0.5, size.width() - 1,
+                                                        size.height() - 1), 8, 8)
+            cover_painter.end()
+        else:
+            image = image.convertToFormat(QtGui.QImage.Format.Format_ARGB32_Premultiplied)
         self._pix = QtGui.QPixmap.fromImage(image)
-        # Soften the actual screen content, not just the edge silhouette. Build
-        # it once per toggle rather than filtering a 300x300 image per frame.
-        low = image.scaled(max(1, w // 4), max(1, h // 4),
-                           QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                           QtCore.Qt.TransformationMode.SmoothTransformation)
-        self._soft = QtGui.QPixmap.fromImage(low.scaled(
-            w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-            QtCore.Qt.TransformationMode.SmoothTransformation))
+        self._pix.setDevicePixelRatio(ratio)
+        self._lid = self._pix
+        if lid is not None and not lid.isNull():
+            lid_image = lid.toImage()
+            if lid_image.isNull():
+                lid_image = image
+            else:
+                lid_image = lid_image.convertToFormat(
+                    QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            self._lid = QtGui.QPixmap.fromImage(lid_image)
+            self._lid.setDevicePixelRatio(lid.devicePixelRatio() or ratio)
         self._progress = max(0.0, min(1.0, float(progress)))
         self._delta = 0.0
+        self._velocity = 0.0
         self._blur_strength = 0.0
-        self.setGeometry(0, 0, w, h)
+        self.setGeometry(0, 0, size.width(), size.height())
         self.show()
         self.update()
+
+    def is_armed(self):
+        """已经 `start()` 过、有画面可画 —— 没画面的空控件显示出来只会是一块空底。"""
+        return not self._pix.isNull()
 
     def set_progress(self, progress):
         value = max(0.0, min(1.0, float(progress)))
         self._delta = value - self._progress
         self._progress = value
-        # Motion blur is strongest while the hinge is moving and fades naturally
-        # at both endpoints, where the live widget takes over pixel-for-pixel.
-        self._blur_strength = (min(1.0, abs(self._delta) * 24.0)
-                               * math.sin(math.pi * value) if 0.0 < value < 1.0 else 0.0)
+        # 残影只画在"立起来"（收起）方向：ghost 是过去几帧的盖子姿态，由老到新、越新越淡
+        # 地叠在当前盖子位置上，读起来就是盖子的运动拖尾；展开时 past 姿态更折叠、范围更小，
+        # 整块落在当前盖子**里面**，叠上去只会把当前画面冲淡，白费十几次透视重采样。
+        # 强度**只看瞬时速度**（每帧位移 |Δprogress|），不套 sin(πp) 那种固定包络：
+        # 收起用 InCubic，最快的一帧在 p→0 那一头，包络会正好把模糊掐在最需要它的地方，
+        # 观感就成了"该糊的地方不糊"。速度本身由缓动曲线给出，端点速度=0，模糊自然归零。
+        self._velocity = abs(self._delta)
+        self._blur_strength = (min(1.0, self._velocity * 80.0)
+                               if self.blurAmount > 0.0 and self._delta < 0.0 else 0.0)
+        if value <= 0.0 or value >= 1.0:
+            self._delta = 0.0
+            self._velocity = 0.0
+            self._blur_strength = 0.0
         self.update()
 
-    def _draw_frame(self, painter, progress, pix, opacity=1.0):
-        w, h = self.width(), self.height()
-        if progress >= 1.0:
-            painter.setOpacity(opacity)
-            painter.drawPixmap(0, 0, pix)
-            painter.setOpacity(1.0)
+    def animate_to(self, progress, duration=None, easing=None):
+        """Animate the shared 0..1 progress; reduced motion still settles immediately."""
+        if self._settle_anim is not None:
+            self._settle_anim.stop()
+            self._settle_anim.deleteLater()
+            self._settle_anim = None
+        target = max(0.0, min(1.0, float(progress)))
+        if REDUCE["on"] or duration is None:
+            duration = 1 if REDUCE["on"] else int(self.duration)
+        curve = easing or self.easing
+        if isinstance(curve, str):
+            curve = EASE["in" if "in" in curve.lower() else "out"]
+        anim = QtCore.QVariantAnimation(self)
+        anim.setStartValue(float(self._progress))
+        anim.setEndValue(target)
+        anim.setDuration(max(1, int(duration)))
+        anim.setEasingCurve(curve if isinstance(curve, QtCore.QEasingCurve) else QtCore.QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(lambda value: self.set_progress(float(value)))
+        anim.finished.connect(lambda: self.set_progress(target))
+        self._settle_anim = anim
+        anim.start()
+        return anim
+
+    def progress(self):
+        return self._progress
+
+    def _project_point(self, x, y, width, height, angle):
+        """Project a point on the leaf around its right-hand vertical hinge."""
+        a = math.radians(max(0.0, min(89.0, float(angle))))
+        if self.direction == "vertical":
+            # Lift the lower edge upwards, keeping the top edge attached.
+            depth = y * math.sin(a)
+            scale = self.perspective / (self.perspective + depth)
+            return QtCore.QPointF(width * 0.5 + (x - width * 0.5) * scale,
+                                 y * math.cos(a) * scale)
+        distance = max(0.0, width - x)
+        depth = distance * math.sin(a)
+        # A real perspective camera makes the far edge smaller while the leaf
+        # rotates.  At angle 0 this deliberately becomes the identity map.
+        scale = self.perspective / max(1.0, self.perspective + depth)
+        screen_x = width - distance * math.cos(a) * scale
+        # 平视：镜头正对屏幕、只绕竖直铰链看这扇盖子。整片叶子不能有整体上下
+        # 位移（那会读成从上方俯视盒子），垂直方向只跟着透视一起对称收缩，
+        # 所以上下两缘永远关于中轴镜像，铰链边一个像素都不动。
+        screen_y = height * 0.5 + (y - height * 0.5) * scale
+        return QtCore.QPointF(screen_x, screen_y)
+
+    def _angle_for_progress(self, progress):
+        """`progress` = 记词板开了多少：1 = 全开（盖子绕右缘立起来、投影≈0），
+        0 = 合上（盖子摊平盖满整块）。展开动画 p 由 0 涨到 1，角度跟着涨。"""
+        return self.maxAngle * max(0.0, min(1.0, float(progress)))
+
+    def _free_edge_x(self, progress):
+        """自由边（离铰链最远那条，也就是拖尾伸出去的那条）在屏幕上的 x。"""
+        return self._project_point(0.0, self.height() * 0.5, self.width(),
+                                   self.height(), self._angle_for_progress(progress)).x()
+
+    def _slice_angle(self, x, width, angle):
+        """Keep every slice on one rigid cover plane around the hinge."""
+        return angle
+
+    def _slice_quad(self, x0, x1, width, height, angle):
+        a0 = self._slice_angle(x0, width, angle)
+        a1 = self._slice_angle(x1, width, angle)
+        return QtGui.QPolygonF([
+            self._project_point(x0, 0, width, height, a0),
+            self._project_point(x1, 0, width, height, a1),
+            self._project_point(x1, height, width, height, a1),
+            self._project_point(x0, height, width, height, a0),
+        ])
+
+    def _draw_slice(self, painter, pixmap, source, destination, opacity=1.0,
+                    offset=QtCore.QPointF(0, 0)):
+        if opacity <= 0.0:
             return
-        if progress <= 0.0:
-            return
+        translated = QtGui.QPolygonF([
+            QtCore.QPointF(point.x() + offset.x(), point.y() + offset.y())
+            for point in destination])
+        # src 用 device-independent 尺寸：drawPixmap 就是按这个尺寸落笔的，
+        # 用 device 像素当 src 会在 125% 缩放屏上把叶子放大 1.25 倍。
+        dip = source.deviceIndependentSize()
+        src = QtGui.QPolygonF([
+            QtCore.QPointF(0, 0), QtCore.QPointF(dip.width(), 0),
+            QtCore.QPointF(dip.width(), dip.height()), QtCore.QPointF(0, dip.height())])
+        transform = QtGui.QTransform.quadToQuad(src, translated)
+        painter.save()
         painter.setOpacity(opacity)
-        slices = 24
-        # Foreshortening is anchored at the right hinge; its distortion tends
-        # continuously to zero at full extension (no last-frame jump).
-        spread = progress ** 0.82
-        for i in range(slices):
-            u0, u1 = i / slices, (i + 1) / slices
-            src = QtCore.QRectF(u0 * w, 0, (u1 - u0) * w, h)
-            bend = 1.0 + 0.18 * (1.0 - progress)
-            d0 = (1.0 - u0) ** bend
-            d1 = (1.0 - u1) ** bend
-            x0 = w - w * d0 * spread
-            x1 = w - w * d1 * spread
-            dst = QtCore.QRectF(x0, 0, max(0.01, x1 - x0), h)
-            painter.drawPixmap(dst, pix, src)
-        painter.setOpacity(1.0)
+        painter.setTransform(transform, True)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.restore()
+
+    def _draw_slices(self, painter, angle, opacity=1.0, offset=QtCore.QPointF(0, 0)):
+        """Draw one continuous cover as a single projected quad.
+
+        Mapping every narrow slice independently looks correct in a static
+        raster but creates sub-pixel seams as the Windows compositor rounds
+        adjacent quads differently on successive frames. A single convex quad
+        has the same hinge geometry without those transient gaps.
+        """
+        width, height = self.width(), self.height()
+        # Render one continuous projected lid. The old implementation drew
+        # dozens of independently transformed slices; Windows rounded their
+        # shared edges differently and produced the reported twitch. One quad
+        # keeps the same hinged perspective without internal seams.
+        quad = self._slice_quad(0.0, float(width), float(width), float(height), angle)
+        self._draw_slice(painter, self._lid, self._lid, quad, opacity, offset)
+
+    def _shutter_span(self):
+        """这一帧的快门轨迹（progress 跨度）与方向；跨度 0 = 不用画运动模糊。
+
+        轨迹长度 = 瞬时速度 × 快门帧数，所以"糊多长"完全由缓动曲线决定：收起走
+        InCubic，起步速度≈0 所以边缘是清的，p→0 那一帧最快、糊得最长。以前那版按
+        固定比例 (0.72/0.42/0.18) 取 3 个姿态、强度再乘 sin(πp) 包络，每个速度都糊
+        一样的量，还把最该糊的结尾掐掉，用户评为"没有非线性的动态模糊"。
+        """
+        if self._blur_strength <= 0.0 or self.blurAmount <= 0.0 or self.blurFrames <= 0.0:
+            return 0.0, 1.0
+        # 残影留在运动的**后方**（p 往前走，身后的姿态是来路）：收起时 delta<0，
+        # 来路的 p 更大 = 更摊平 = 自由边更靠左，于是拖尾铺在叶子左外侧；展开时镜像。
+        back = -1.0 if self._delta > 0.0 else 1.0
+        span = self._velocity * self.blurFrames
+        if self.blurMaxPx > 0.0:
+            # 像素预算：低 p 段自由边一帧能扫过一百多 px，只按 p 限幅会得到一条比
+            # 叶子本身还宽的灰浆。把像素上限折回 progress（反射两轮就够收敛）。
+            for _ in range(2):
+                travel = abs(self._free_edge_x(self._progress)
+                             - self._free_edge_x(self._progress + back * span))
+                if travel <= self.blurMaxPx or travel <= 1e-6:
+                    break
+                span *= self.blurMaxPx / travel
+        return (span if span > 1e-4 else 0.0), back
+
+    def _blur_buffer(self):
+        """快门累加用的透明缓冲：12 个盖子姿态得先在干净底上叠好，再整块贴回窗口。"""
+        ratio = self.devicePixelRatioF()
+        size = QtCore.QSize(int(round(self.width() * ratio)),
+                            int(round(self.height() * ratio)))
+        if (self._buffer is None or self._buffer.devicePixelRatio() != ratio
+                or self._buffer.size() != size):
+            self._buffer = QtGui.QPixmap(size)
+            self._buffer.setDevicePixelRatio(ratio)
+        self._buffer.fill(QtCore.Qt.GlobalColor.transparent)
+        return self._buffer
+
+    def _draw_shutter(self, painter, span, back):
+        """快门积分：把这一帧走过的轨迹上等时距的**盖子**姿态按运行平均叠成一帧。
+
+        内容层（记词板快照）永远平铺、永远清晰 —— 会动的只有盖子，所以糊的也只有
+        盖子，和真实快门糊"运动中的那个物体"一致。缓冲里从最早画到当前，第 i 个用
+        `setOpacity(1/(i+1))` 的 SourceOver 叠上去：权重逐帧递减、总和为 1，就是标准的
+        运行平均。盖满的地方 alpha=1（不透明，压得住底下的内容），刚扫过的地方 alpha
+        只到几分之一 —— 半透明盖子压在板面上，读数正好是那一小段曝光。
+        """
+        buffer = self._blur_buffer()
+        inner = QtGui.QPainter(buffer)
+        try:
+            inner.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+            inner.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            # 从最早（离当前最远）画到当前：第一份满不透明地打底，后面的按运行平均
+            # 掺进来，所以最后一帧的姿态只占 1/12 —— 没有"清晰的当前副本"。
+            for index in range(self.BLUR_SAMPLES - 1, -1, -1):
+                theta = self._progress + back * span * index / float(self.BLUR_SAMPLES)
+                self._draw_slices(inner, self._angle_for_progress(theta),
+                                  1.0 / float(self.BLUR_SAMPLES - index))
+        finally:
+            inner.end()
+        painter.drawPixmap(0, 0, buffer)
 
     def paintEvent(self, _event):
-        if self._pix.isNull() or self._progress <= 0.0:
+        if self._pix.isNull():
             return
         painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        # Paint the sharp frame first and soften the content on top. SourceOver
-        # preserves full opacity where both frames overlap (no grey wash).
-        self._draw_frame(painter, self._progress, self._pix)
-        if self._blur_strength > 0.01:
-            self._draw_frame(painter, self._progress, self._soft,
-                             min(0.88, self._blur_strength * 0.88))
-        painter.end()
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+            # 叶子在斜姿态下上下两条边是斜线，不开抗锯齿就是硬邦邦的阶梯；
+            # 摊平端点（progress>=1）走的是整像素 drawImage，AA 不改变结果，
+            # 这条由 test_b5_wordbook_leaf_matches_real_panel_at_handoff 逐像素锁着。
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            # 内容层：记词板快照原样平铺，全程不动、不变形、不加任何滤镜 ——
+            # 动画里的板面因此和动画外的板面逐像素一致（用户报的"动画里暗几个度"）。
+            painter.drawImage(0, 0, self._pix.toImage())
+            if self._progress <= 0.0:
+                # 合上：盖子摊平、像素精确地盖满整块（不投影，免得边缘糊一圈）。
+                painter.drawImage(0, 0, self._lid.toImage())
+                return
+            if self._progress >= 1.0:
+                # 全开：盖子已经立起来（投影面积≈0），只剩内容层。
+                return
+            angle = self._angle_for_progress(self._progress)
+            # 盖子自由边外那条通高的落影/冷色光带已去掉：它在窄进度下比盖子本身
+            # 还宽，看着就是"左沿贴了一条阴影"。
+            span, back = self._shutter_span()
+            if span > 0.0:
+                self._draw_shutter(painter, span, back)
+            else:
+                self._draw_slices(painter, angle, 1.0)
+            # 铰链侧原来有一条 10px 通高的冷白高光。它是整条竖直矩形，不跟着
+            # 盖子投影走，在斜边上会露出硬邦邦的一截，读起来像"记词板右沿贴了
+            # 一条灰带"（用户报的边角绘制问题）。整条删掉。
+        finally:
+            painter.end()
+
+    def mousePressEvent(self, event):
+        if self.enableDrag:
+            self._drag_origin = event.position()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.enableDrag and self._drag_origin is not None:
+            axis = event.position().x() - self._drag_origin.x() if self.direction == "horizontal" else event.position().y() - self._drag_origin.y()
+            self.set_progress(self._progress + axis / max(1.0, self.width() if self.direction == "horizontal" else self.height()))
+            self._drag_origin = event.position()
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.enableDrag:
+            self._drag_origin = None
+            self.animate_to(1.0 if self._progress >= 0.5 else 0.0)
+            event.accept()
+
+
+_WordbookFold = HingeFoldTransition
 
 
 class Dock(QtWidgets.QWidget):
@@ -2304,11 +2578,12 @@ class Dock(QtWidgets.QWidget):
     PANEL_H = 300
     EDGE_GAP = 0            # 贴死屏幕右边缘（留缝会被看成"没贴边"）
     WB_W = 300              # 记词板（挂在主面板左边，自己一扇"活板门"）
+    WB_FOOTER_H = 48        # 记词板底栏（三个按钮）大概占的高度：做封面时要用
     PANEL_W_MIN = 260       # 主面板宽度可拖：下限（再窄按钮会挤破）
     PANEL_W_MAX = 460       # 上限（再宽会盖住屏幕里太多东西）
 
     def __init__(self, cfg, on_pick, on_lookup, on_clip, on_settings, on_quit,
-                 wb=None, on_word=None):
+                 wb=None, on_word=None, before_collapse=None):
         super().__init__(None)
         self.cfg = cfg
         d = cfg.get("dock") or {}
@@ -2325,6 +2600,8 @@ class Dock(QtWidgets.QWidget):
         # 记词板的数据源（可能在测试里是 None：Dock 的 UI 必须还能建起来）
         self.wb = wb
         self.on_word = on_word or (lambda _w: None)
+        self.before_collapse = before_collapse
+        self._collapse_busy = False
         # 钉死在一台屏幕上。**不能**用 self.screen() —— 它是按窗口当前所在位置推断的，
         # 点在细边的子控件上时事件被转发过来，那一瞬间会解成别的屏幕，窗口直接被甩到副屏
         # （实测 geo 从 QRect(1689,396,352,360) 变成 QRect(3908,353,293,300)）。
@@ -2395,7 +2672,9 @@ class Dock(QtWidgets.QWidget):
         # 记词板：一整行按钮（宽度跟着面板走，不跟别的按钮抢空间）
         self.btn_wb = SmoothButton("记词板", "normal")
         self.btn_wb.setToolTip("存下来的词（活板门从左边展开）")
-        self.btn_wb.clicked.connect(self.toggle_wordbook)
+        # QPushButton.clicked emits a bool; do not let that bool become the
+        # explicit open_state argument, or a closed button click requests close.
+        self.btn_wb.clicked.connect(lambda _checked=False: self.toggle_wordbook())
         v.addWidget(self.btn_wb)
 
         self.lb_hint = QtWidgets.QLabel("", objectName="note")
@@ -2468,7 +2747,11 @@ class Dock(QtWidgets.QWidget):
         # 抽屉永远停在窗口最左边 x=0；关着的时候靠 mask（_apply_mask）把它整条裁掉，
         # 所以关→开是"掀开"（可见宽度 0→WB_W），不是整块滑进来。
         self.wbpanel.move(0, 0)
-        self._wb_fold = _WordbookFold(self)
+        # 残影（运动模糊）默认开着：收起方向每一帧在自由边外留三档淡一点的
+        # 旧姿态，叶子边缘就有拖尾；展开方向 set_progress 会把强度按方向清零，
+        # 不会在铰链侧糊出一片。
+        self._wb_fold = _WordbookFold(self, direction="horizontal", duration=620,
+                                      maxAngle=89)
         self._wb_fold.setGeometry(0, 0, self.WB_W, self.PANEL_H)
         self._wb_fold.hide()
         self.wbpanel.setVisible(self.wb_open)
@@ -2483,12 +2766,13 @@ class Dock(QtWidgets.QWidget):
         self.lb_hint.setText(text)
 
     # ---------- 记词板 ----------
-    def toggle_wordbook(self):
-        """「活板门」：记词板是窗口最左边那一扇，打开是"掀开"，不是整块平移。
+    def toggle_wordbook(self, open_state=None, after=None):
+        """「活板门」：记词板是窗口最左边那一扇，打开是"盖子展开"，关闭是"盖子收起来"。
 
         为什么不是平移：抽屉原来从 x=WB_W 滑到 x=0（整块滑出来），用户报"不像活板门"。
-        抽屉始终在窗口内 x=0；动画时由铰链侧展开的预览层绘制折叠画面，
-        真实抽屉暂时隐藏，结束后恢复交互。窗口 mask 只在两个稳态切换。
+        抽屉始终在窗口内 x=0；叶子（盖子）carry 的就是记词板画面本身，绕右缘铰链翻转，
+        投影四边形以外什么都不画；真实面板在底层原地不动，过渡期间退场、`_settle` 时回来。
+        窗口 mask 只在两个稳态切换。
         曲线 OutCubic（开）/ InCubic（关）：门是"荡开、收住"，不用过冲回弹。
         """
         previous = getattr(self, "_wb_anim", None)
@@ -2496,38 +2780,101 @@ class Dock(QtWidgets.QWidget):
             previous.stop()
             previous.deleteLater()
             self._wb_anim = None
-        self.wb_open = not self.wb_open
+        target_open = (not self.wb_open) if open_state is None else bool(open_state)
+        if target_open == self.wb_open and previous is None:
+            if after is not None:
+                after()
+            return
+        self.wb_open = target_open
         self.refresh_wordbook()
         self.wbpanel.move(0, 0)
-        self.wbpanel.show()
+        # 两层：**内容层** = 记词板本身（快照原样平铺，全程清晰、不压扁、不加滤镜），
+        # **盖子层** = 一块"合上的封面"（标题条 + 底色，列表主体与底栏是空的），展开时
+        # 它绕右缘掀开、内容一块块露出来，收起时它压回摊平把内容盖住。两层在自己矩形里
+        # 都铺满像素，所以这块控件永远不透明 —— 不用再靠清透明去盖 backing store 的旧
+        # 像素（用户 m11223 的"进动画前闪过什么"）。
+        #
+        # 必须先 show 再拍：`QWidget.render()` 只对"曾被显示过"的控件有效，从没 show 过的
+        # 面板渲染出来是一块空板（实测 15625/15625 采样点全不一样；就是用户报过的
+        # "收起时内容不同步"）。
+        self.wbpanel.setUpdatesEnabled(True)
         self.wbpanel.clearMask()
-        self.panel.raise_()
-        self.rail.raise_()
-        self.grip.raise_()
-        if self.wb_open:
-            self._apply_mask()
-        pix = self.wbpanel.grab()
+        self.wbpanel.show()
+        self.wbpanel.raise_()
+        layout = self.wbpanel.layout()
+        if layout is not None:
+            layout.activate()                   # 封面要按 wb_scroll 的位置挖洞，先把布局落定
+        # 快照按屏幕缩放渲染：叶子最终要和真实面板在同一块像素网格上，
+        # 125% 缩放下按 1.0 拍图 = 叶子模糊、交接时突然变清晰。
+        ratio = self.wbpanel.devicePixelRatioF() or 1.0
+        leaf = QtGui.QPixmap(int(round(self.WB_W * ratio)), int(round(self.PANEL_H * ratio)))
+        leaf.setDevicePixelRatio(ratio)
+        leaf.fill(QtCore.Qt.GlobalColor.transparent)
+        self.wbpanel.render(leaf)
+        lid = self._make_wb_lid(leaf)
         self.wbpanel.hide()
-        self._wb_fold.start(pix, self._wb_reveal / float(self.WB_W))
+        self._wb_fold.start(leaf, self._wb_reveal / float(self.WB_W), lid)
         self._wb_fold.raise_()
+        # 这里 `repaint()` 是为了让 p=0 的那一帧（盖满的封面 + 平铺的内容）在窗口 mask
+        # 放开**之前**同步落进 backing store。反过来 mask 一变大，Windows 先把那块刚 show
+        # 出来拍快照的记词板合成出来 —— 用户 m11223 的"闪过什么东西 / 突然变暗"。
+        self._wb_fold.repaint()
+        # 过渡期间这块矩形全在窗口 mask 里（两层画面都铺满，没有"叶子之外"）。
+        self.setMask(QtGui.QRegion(0, 0, self.width(), self.height()))
         _stop_anims(self.wbpanel, b"pos")       # 旧版留下过的位移动画：别让两层动画打架
         a = QtCore.QVariantAnimation(self)
         a.setStartValue(float(self._wb_reveal))
         a.setEndValue(float(self.WB_W if self.wb_open else 0.0))
-        a.setDuration(1 if REDUCE["on"] else int(DUR["base"]))
+        a.setDuration(1 if REDUCE["on"] else self._wb_fold.duration)
         a.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic if self.wb_open
                          else QtCore.QEasingCurve.Type.InCubic)
         a.valueChanged.connect(lambda v: self._set_wb_reveal(float(v)))
-        a.finished.connect(self._settle)
+        def finish_wordbook():
+            if self._wb_anim is a:
+                self._wb_anim = None
+            self._settle(after)
+        a.finished.connect(finish_wordbook)
         self._wb_anim = a                        # 留引用：被 GC 掉动画会停在半开
         a.start()
         self._save()
 
+    def _make_wb_lid(self, leaf):
+        """从记词板快照里做一张"合上的封面"：底色 + 顶栏标题条，列表主体与底栏是空的。
+
+        挖洞的位置直接取控件几何（`wb_scroll` 顶边往上留标题，底栏往上留三个按钮），
+        以后调面板布局封面自动跟着变。文字是照抄快照上的像素 —— 不重新排版，省得
+        字号 / DPI 对不上。
+        """
+        ratio = leaf.devicePixelRatio() or 1.0
+        lid = QtGui.QPixmap(leaf.size())
+        lid.setDevicePixelRatio(ratio)
+        lid.fill(QtGui.QColor(T["surface"]))
+        painter = QtGui.QPainter(lid)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        try:
+            head_bottom = self.wb_scroll.geometry().top()
+            if head_bottom <= 0:                # 布局还没跑过：退回一个保守的标题条高度
+                head_bottom = int(round(52 * ratio))
+            head_bottom = max(1, int(round(head_bottom * ratio)))
+            painter.drawPixmap(QtCore.QRect(0, 0, lid.width(), head_bottom),
+                               leaf, QtCore.QRect(0, 0, leaf.width(), head_bottom))
+            footer_top = int(round((self.PANEL_H - self.WB_FOOTER_H) * ratio))
+            if footer_top > head_bottom:
+                painter.drawPixmap(QtCore.QRect(0, footer_top, lid.width(),
+                                                leaf.height() - footer_top),
+                                   leaf, QtCore.QRect(0, footer_top, leaf.width(),
+                                                      leaf.height() - footer_top))
+        finally:
+            painter.end()
+        return lid
+
     def _set_wb_reveal(self, v):
-        self._wb_reveal = v
-        self._clip_wordbook()
+        # During motion the real panel stays mounted under the cover. Do not
+        # mutate the child mask per frame: layered Windows windows can repaint
+        # the old region after the new one, producing the reported flashing.
+        self._wb_reveal = max(0.0, min(float(self.WB_W), float(v)))
         if hasattr(self, "_wb_fold"):
-            self._wb_fold.set_progress(float(v) / float(self.WB_W))
+            self._wb_fold.set_progress(self._wb_reveal / float(self.WB_W))
 
     def _clip_wordbook(self):
         """把抽屉裁到"已掀开的那条"（`[WB_W-r, WB_W)`）。
@@ -2576,7 +2923,14 @@ class Dock(QtWidgets.QWidget):
             return
         items = self.wb.items()[:200]       # 列表只画前 200 条，再多也没人翻
         for it in items:
-            self.wb_v.insertWidget(self.wb_v.count() - 1, self._wb_row(it))
+            row = self._wb_row(it)
+            self.wb_v.insertWidget(self.wb_v.count() - 1, row)
+            # 新建的子控件默认是隐藏的，而 QWidget.render() **不画隐藏的子控件**：
+            # 开/关记词板紧接着就要拍快照当叶子画面，不显式 show 的话叶子就是一块
+            # 空板（用户报的「收起时内容不同步」）。
+            row.show()
+        # 几何同样要当场落定：默认得等事件循环处理 LayoutRequest，而快照是同步拍的。
+        self.wb_v.activate()
         if self.wb_open:
             self.wb_scroll.verticalScrollBar().setValue(0)
 
@@ -2682,17 +3036,32 @@ class Dock(QtWidgets.QWidget):
 
     # ---------- 展开 / 收起 / 摆位置 ----------
     def toggle(self):
-        self.expanded = not self.expanded
-        if not self.expanded and self.wb_open:
-            # 主面板收回去时记词板一起收：那扇门本来就没有"自己单独开着"的样子
-            # （它的开关按钮在主面板里，展开时才有）。
-            self.wb_open = False
-            self._wb_reveal = 0.0
-            self.wbpanel.setVisible(False)
-        self._apply(animate=True)
-        if self.expanded:
-            self.input.setFocus()       # 展开就是为了打字（点细边本来就是用户主动操作）
-        self._save()
+        if not self.expanded:
+            self.expanded = True
+            self._apply(animate=True)
+            self.input.setFocus()
+            self._save()
+            return
+        if self._collapse_busy:
+            return
+        self._collapse_busy = True
+
+        def collapse_panel():
+            self.expanded = False
+            self._apply(animate=True)
+            self._save()
+            self._collapse_busy = False
+
+        def close_wordbook_then_panel():
+            if self.wb_open or getattr(self, "_wb_anim", None) is not None or self._wb_fold.isVisible():
+                self.toggle_wordbook(open_state=False, after=collapse_panel)
+            else:
+                collapse_panel()
+
+        if self.before_collapse is not None:
+            self.before_collapse(close_wordbook_then_panel)
+        else:
+            close_wordbook_then_panel()
 
     def set_screen(self, name):
         """换一块屏挂（设置 / 托盘里选的）。"""
@@ -2765,7 +3134,7 @@ class Dock(QtWidgets.QWidget):
             _anim(self.panel, b"pos", self.panel.pos(), QtCore.QPoint(x_hidden, 0),
                   DUR["base"], curve=QtCore.QEasingCurve.Type.InCubic, done=self._settle)
 
-    def _settle(self):
+    def _settle(self, after=None):
         """把窗口和子控件摆成当前状态的"静止样子"（动画结束时也走这里）。
 
         窗口是固定宽度的一块（记词板宽 + 主面板宽 + 缝 + 细边），收起时大部分是透明的：
@@ -2781,8 +3150,15 @@ class Dock(QtWidgets.QWidget):
         self.wbpanel.move(0, 0)                 # 抽屉位置恒定，露多少由 mask 决定
         self.wbpanel.setVisible(self.wb_open)
         if hasattr(self, "_wb_fold"):
-            self._wb_fold.hide()
             self._wb_fold.set_progress(1.0 if self.wb_open else 0.0)
+            if self.wb_open or not self._wb_fold.is_armed():
+                # 全开：盖子立起来了、看不见，把这块交回真实面板；还没拍过快照也别显示
+                # （从没 show 过的记词板渲染出来是空板，露出来就是一块空底）。
+                self._wb_fold.hide()
+            else:
+                # 合上：摊平的封面要一直留在那儿把记词板盖住 —— 这就是"关着"的样子。
+                self._wb_fold.show()
+                self._wb_fold.raise_()
         self._wb_reveal = float(self.WB_W if self.wb_open else 0)
         self._clip_wordbook()
         self._apply_mask()
@@ -2792,6 +3168,8 @@ class Dock(QtWidgets.QWidget):
         self.grip.setGeometry(0, 0, 6, self.PANEL_H)
         self.grip.raise_()
         self.raise_()
+        if after is not None:
+            after()
 
     def _apply_mask(self):
         """可点/可画区域 = 细边 ∪ 主面板（展开时）∪ 记词板占的那块（开着时）。
@@ -2804,7 +3182,8 @@ class Dock(QtWidgets.QWidget):
         reg = QtGui.QRegion(x0 + self._pan_w + 6, 0, self.RAIL_W, self.PANEL_H)
         if self.expanded:
             reg = reg.united(QtGui.QRegion(x0, 0, self._pan_w, self.PANEL_H))
-        if self.wb_open:
+        if self.wb_open or (hasattr(self, "_wb_fold") and self._wb_fold.isVisible()):
+            # 合着但封面还挂着时也算进来：封面就是"关着"那块画面本身。
             reg = reg.united(QtGui.QRegion(0, 0, x0, self.PANEL_H))
         self.setMask(reg)
 
@@ -2983,9 +3362,9 @@ class Settings(QtWidgets.QDialog):
 
         f.addRow(self._sec("问答模型"))
         f.addRow("本地模型", self.ollama)
-        f.addRow("DeepSeek 地址", self.url)
-        f.addRow("DeepSeek 模型", self.model)
-        f.addRow("DeepSeek Key", self.key)
+        f.addRow("联网模型 地址", self.url)
+        f.addRow("联网模型 名称", self.model)
+        f.addRow("联网模型 Key", self.key)
         f.addRow(self._ds_guide())      # 接 DS 的路径得写在手边，不能让用户去猜
 
         f.addRow(self._sec("进阶"))
@@ -2994,8 +3373,10 @@ class Settings(QtWidgets.QDialog):
         hint = QtWidgets.QLabel(
             "释义以离线词典 ECDICT 和有道为准，查不到再用百度翻译（要在 fanyi-api.baidu.com "
             "免费领 appid 和密钥）。\n"
-            "问答默认交给本地 9B（免费、不花 token）；本地没在跑时会自动改用 DeepSeek。"
-            "按住 Shift 点「问 AI」就是强制走 DeepSeek。")
+            "详解和问答默认走「免费云端」（kilo / pollinations，不用注册、不用填 key、"
+            "不用装任何东西；一家限流就换另一家）；"
+            "本机装了 Ollama 就优先用它（不出网），上面那三格填了 Key 的联网模型排在最前面。"
+            "按住 Shift 点「问 AI」= 强制走联网模型。")
         hint.setObjectName("note")
         hint.setWordWrap(True)
         f.addRow("", hint)
@@ -3037,11 +3418,11 @@ class Settings(QtWidgets.QDialog):
         lb.setObjectName("sechead")
         return lb
 
-    # ---------- DeepSeek 接入引导 ----------
+    # ---------- 联网模型接入引导 ----------
     def _ds_guide(self):
-        """「DeepSeek 怎么接」这件事得在设置窗里讲清楚，不能让用户自己猜。
+        """「想更稳/更准的话怎么接一个模型」得在设置窗里讲清楚，不能让用户自己猜。
 
-        三件事按这个顺序说：①**不接也能用**（本地 9B 免费，这是产品的默认路径）；
+        三件事按这个顺序说：①**不接也能用**（免费云端默认就通，不用注册）；
         ②想接的话，Key 从哪里来、填哪儿；③填完到底成没成（给一个"测一下"，
         把"我填完了"变成一个确定答案）。
         """
@@ -3054,7 +3435,7 @@ class Settings(QtWidgets.QDialog):
 
         head = QtWidgets.QHBoxLayout()
         head.setSpacing(8)
-        title = QtWidgets.QLabel("接 DeepSeek（可选）", objectName="tiphead")
+        title = QtWidgets.QLabel("接一个联网模型（可选）", objectName="tiphead")
         self.lb_ds_state = QtWidgets.QLabel("", objectName="tiphead")
         head.addWidget(title)
         head.addStretch(1)
@@ -3062,7 +3443,9 @@ class Settings(QtWidgets.QDialog):
         v.addLayout(head)
 
         self.lb_ds_free = QtWidgets.QLabel(
-            "不接也能用：问答默认走本地 9B（免费、不花 token），本地没在跑时才轮到 DeepSeek。",
+            "不填也能用：详解和问答默认走免费云端（kilo / pollinations，不用注册、不用 key）。"
+            "想更稳/更准再填一个 Key —— 这三格是通用的，智谱 GLM-4-Flash、硅基流动的免费档"
+            "也兼容，把地址和模型名一起换掉就行。",
             objectName="tipline")
         self.lb_ds_free.setWordWrap(True)
         v.addWidget(self.lb_ds_free)
@@ -3073,9 +3456,11 @@ class Settings(QtWidgets.QDialog):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(4)        # 三步之间挨紧一点，但 2 不在刻度上
         for i, line in enumerate([
+            "（下面拿 DeepSeek 当例子；智谱 GLM-4-Flash、硅基流动的免费档同理，"
+            "把上面地址和模型名换成它文档里给的就行）",
             "① 打开 platform.deepseek.com，注册后在 API Keys 里创建一个 Key",
             "② 复制那串 sk- 开头的 Key",
-            "③ 粘到上面的「DeepSeek Key」，点保存",
+            "③ 粘到上面的「联网模型 Key」，点保存",
         ], 1):
             lb = QtWidgets.QLabel(line, objectName="tipline")
             lb.setWordWrap(True)
@@ -3290,6 +3675,32 @@ class App(QtCore.QObject):
         card = self._ensure_card(pos=at or QtGui.QCursor.pos())
         self._run(self._lookup_brief, text, at, card=card)
 
+    def toggle_word_lookup(self, text, at=None):
+        """Clicking the same word again closes its explanation instead of reloading it."""
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            from . import wordbook
+            same = (self.current is not None and self.current.isVisible()
+                    and not getattr(self.current, "_closing", False)
+                    and self.current.brief
+                    and wordbook.key_of(self.current.brief) == wordbook.key_of({"lexeme": text}))
+        except Exception:
+            same = False
+        if same:
+            self.current.hide_card()
+            return
+        self.lookup_text(text, at=at)
+
+    def _before_dock_collapse(self, done):
+        """Close the visible card before Dock starts its two-stage collapse."""
+        card = self.current
+        if card is not None and card.isVisible():
+            card.hide_card(after=done)
+        else:
+            done()
+
     def on_hotkey(self, name):
         if name is None:
             self._notify("热键都被别的软件占了，先用托盘右键菜单里的「查屏幕上的词」。")
@@ -3346,7 +3757,9 @@ class App(QtCore.QObject):
         kind, val = piece
         if kind == "src":
             self._ask_started = True
-            who = "AI（DeepSeek）" if val == "deepseek" else "AI（本地 9B）"
+            who = {"deepseek": "AI（联网模型）", "kilo": "AI（免费云端）",
+                   "pollinations": "AI（免费云端）"}.get(
+                val, "AI（本地 9B）")
             card.chat_begin(who)
         elif kind == "text":
             card.chat_push(str(val))
@@ -3437,14 +3850,18 @@ class App(QtCore.QObject):
 
     # ---------- 卡片管理 ----------
     def _ensure_card(self, pos=None):
-        if self.current and not self.current.pinned:
+        # A closing card may still own a Dock-collapse callback. Do not reuse it
+        # for a new lookup, or show_brief() would clear that callback mid-flight.
+        if (self.current and not self.current.pinned
+                and not getattr(self.current, "_closing", False)):
             return self.current
         c = Card(width=int(self.cfg.get("card_width") or 0))
+        c._close_done = []
         c.closed.connect(self._on_card_closed)
         # 绑定 card：结果回发起那一次交互的卡片，而不是"最新那张"（hy4 评审第 3 条）
         c.detail_requested.connect(lambda b, c=c: self._on_detail(c, b))
         c.ask_requested.connect(lambda b, q, e, c=c: self._on_ask(c, b, q, e))
-        c.word_clicked.connect(lambda w: self.lookup_text(w))
+        c.word_clicked.connect(lambda w: self.toggle_word_lookup(w))
         c.save_requested.connect(lambda b, c=c: self._on_save(c, b))
         c.width_changed.connect(self._on_card_width)
         self.cards.append(c)
@@ -3498,7 +3915,7 @@ class App(QtCore.QObject):
         card.btn_detail.setEnabled(False)
         card.start_detail_wait()            # 按钮上数秒：冷启动十几秒也看得见它在动
         card.detail.show()
-        card.detail.setPlainText("正在整理…（本地模型冷启动要十几秒，DeepSeek 快一些）")
+        card.detail.setPlainText("正在整理…（本地模型冷启动要十几秒；免费云端一般几秒）")
         card._resize_keep_place()
         self._run(self._lookup_detail, brief, card=card)
 
@@ -3627,10 +4044,11 @@ def run(cfg):
                          at=dock.anchor() if dock else None)
 
     dock = Dock(cfg, ctrl.start_pick,
-                lambda t: ctrl.lookup_text(t, at=dock.anchor()),
+                lambda t: ctrl.toggle_word_lookup(t, at=dock.anchor()),
                 on_clip, on_settings, on_quit,
                 wb=ctrl.wb,
-                on_word=lambda w: ctrl.lookup_text(w, at=dock.anchor()))
+                on_word=lambda w: ctrl.toggle_word_lookup(w, at=dock.anchor()),
+                before_collapse=ctrl._before_dock_collapse)
     dock.set_hint("热键：%s 框选屏幕。不想记热键就用上面的按钮。" % cfg["hotkey"])
     ctrl.dock = dock
     tray.attach_dock(dock)      # 托盘里能开关面板、换屏、展开收起

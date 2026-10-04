@@ -41,13 +41,34 @@ DEFAULTS = {
     # 挂屏幕右边缘的常驻面板。y=None 表示竖直居中；screen=None 表示启动时取鼠标所在那块屏。
     "dock": {"enabled": True, "expanded": False, "y": None, "screen": None},
     "providers": {
-        # 本地 9B：出初稿、答疑、格式化。免费。
-        "ollama": {
+        # 不用注册、不用 key 的免费云端模型（OpenAI 兼容）：词典没命中时的初稿、
+        # 「详解」、「问 AI」都能用它 —— 开箱即用，别人 clone 下来不用先装任何东西。
+        # 代价：查的词和你问的问题会经过第三方（kilo.ai / pollinations.ai），介意就设成 false。
+        # 免费通道按下面这个顺序排队，前面挂了会自动退到后面那个：
+        "kilo": {
             "enabled": True,
+            "url": "https://api.kilo.ai/api/gateway/chat/completions",
+            # kilo-auto/free = 让它自己在免费档里挑一个模型（实测走的是 stealth 那档，
+            # 中文词典体回得很正）。限额 200 次/小时/IP，匿名就有，不用注册。
+            "model": "kilo-auto/free",
+        },
+        "pollinations": {
+            "enabled": True,
+            "url": "https://text.pollinations.ai/openai",
+            # 模型名不能乱填：pollinations 的 /models 里标 tier=anonymous 的只有 openai-fast
+            # （GPT-OSS 20B），填 "openai" 那种是要 token 的档，匿名请求一律 402。
+            "model": "openai-fast",
+        },
+        # 本地 9B（Ollama）：免费、不出网，但要自己装，所以**默认关**。
+        # 装了就把它打开（或在设置窗里填模型名），它会排在免费通道前面。
+        "ollama": {
+            "enabled": False,
             "url": "http://127.0.0.1:11434/v1/chat/completions",
             "model": "qwen3.5:9b",
         },
-        # 联网强模型：只用来出「必须准且详细」的那一问。
+        # 要 key 的联网强模型：只用来出「必须准且详细」的那一问。
+        # 这一格其实是"任何 OpenAI 兼容服务"：填别的厂的 url + model + key 就行
+        # （智谱 GLM-4-Flash、硅基流动的免费模型都兼容，README 里有表）。
         "deepseek": {
             "enabled": False,
             "url": "https://api.deepseek.com/v1/chat/completions",
