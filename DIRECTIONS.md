@@ -440,3 +440,19 @@ User said (m11860): "把github项目的readme收拾一下。我想纠正一下�
 （**按名字现查 dict，所以测试里 monkeypatch `providers.kilo_chat` 仍然生效** —— 别改成模块级 dict 常量，
 那样 patching 就失效了）；`lookup._free_list()` 按顺序返回开着的那些，`_brief_llm`/`detail` 逐个试、
 第一家成功就用它，全挂才写 `免费云端（名字）没答上：…`。`ask_plan` 取列表第一个。
+
+### 2026-10-05 追加：kilo 点名具体型号（auto 太慢）
+
+用户："还有 kilo 挺慢的"。实测（同一套真实提示词，`tmp\_kilo_raw.py` / `tmp\_kilo_models.py`）：
+
+- `model: kilo-auto/free` 会被路由到 **`stealth/space-bunny-alpha`**，那是个**先写 reasoning 再出正文**
+  的模型：「详解」那一问 **76.4s**、回包 36.9KB 里 **16,984 字符是 reasoning**、正文只有 987 字符；
+  另一次 30.9s。而 `lookup.detail()` 的 timeout 是 60s ⇒ **详解走 kilo 基本每次都是超时→退回初稿**。
+  `reasoning_effort: "none"` 传了也没用（还是 12,879 字符 reasoning、53.1s）。
+- `kilo-auto/efficient` 匿名请求 **401**（要 key）；`inclusionai/ling-3.1-flash` 35.8s；
+  `nvidia/nemotron-3-ultra-550b-a55b:free` 22.0s。
+- **`stepfun/step-3.7-flash:free` 17.9s、正文 1334 字符、六节齐全** ⇒ 选它。初稿那一问两者都在
+  3 秒上下（auto 2.6~3.3s / stepfun 3.3~6.6s），所以整体换过去不亏。
+- 可选型号列表：`GET https://api.kilo.ai/api/gateway/models`（匿名 200，实测 401 个）。
+  默认值写在 `src/snapword/config.py` 的 `DEFAULTS["providers"]["kilo"]["model"]`；
+  **已有的 `config.json` 会盖掉默认值**，老配置要手动改这一格。

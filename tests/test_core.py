@@ -338,7 +338,7 @@ def test_free_cloud_covers_machines_without_any_local_model_or_key():
     # 默认配置本身就得开着免费通道、关着本地模型
     d = config.DEFAULTS["providers"]
     assert d["kilo"]["enabled"] and d["kilo"]["url"].endswith("/chat/completions")
-    assert d["kilo"]["model"] == "kilo-auto/free", d["kilo"]["model"]
+    assert d["kilo"]["model"] == "stepfun/step-3.7-flash:free", d["kilo"]["model"]
     assert d["pollinations"]["enabled"] and d["pollinations"]["url"].endswith("/openai")
     # 模型名必须是匿名档那个（pollinations 的 /models 里 tier=anonymous 的只有 openai-fast）；
     # 填成 "openai" 那种要 token 的档，匿名请求一律 402 —— 实测踩过

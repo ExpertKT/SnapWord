@@ -48,9 +48,11 @@ DEFAULTS = {
         "kilo": {
             "enabled": True,
             "url": "https://api.kilo.ai/api/gateway/chat/completions",
-            # kilo-auto/free = 让它自己在免费档里挑一个模型（实测走的是 stealth 那档，
-            # 中文词典体回得很正）。限额 200 次/小时/IP，匿名就有，不用注册。
-            "model": "kilo-auto/free",
+            # 指定具体型号而不是 kilo-auto/free：auto 会挑到 stealth/space-bunny-alpha
+            # 那个**先写 reasoning 再出正文**的模型，实测「详解」那一问要 30 秒以上
+            # （30.9s / content 973 字符），慢到用户能感觉到；stepfun 这个 flash 同题
+            # 17.9 秒、六节齐全（初稿一问两者都是 3 秒上下）。限额 200 次/小时/IP，匿名就有。
+            "model": "stepfun/step-3.7-flash:free",
         },
         "pollinations": {
             "enabled": True,

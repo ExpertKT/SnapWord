@@ -294,8 +294,12 @@ GitHub 在国内慢得没法用（`github.com` ~50 KB/s，`raw.githubusercontent
 （同一时刻智谱和硅基流动都还在要 Authorization）：
 
 - **`kilo.ai` 网关**（默认先试它）：`POST https://api.kilo.ai/api/gateway/chat/completions`，
-  `model: kilo-auto/free`（让它自己在免费档里挑），限额 **200 次/小时/IP**。实测它对
+  `model: stepfun/step-3.7-flash:free`，限额 **200 次/小时/IP**。实测它对
   "一行一个义项"的中文词典提示回得很正、流式也正常，所以让它排在前面。
+  （原先填的是 `kilo-auto/free`，让网关自己在免费档里挑；但它会挑到"先写 reasoning
+  再出正文"的模型，「详解」那一问实测要 30 秒以上，所以改成点名这个 flash 档：同一问
+  17.9 秒、六节齐全。嫌慢可以自己换 `providers.kilo.model`，`GET
+  https://api.kilo.ai/api/gateway/models` 能列出全部可选型号。）
 - **`pollinations`**（备用）：`POST https://text.pollinations.ai/openai`。
 
 两个实测细节，遇到报错时对号入座：
